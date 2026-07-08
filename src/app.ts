@@ -9,29 +9,28 @@ const app = express();
 // CORS configuration
 const getCorsOptions = () => {
   const nodeEnv = process.env["NODE_ENV"] ?? "development";
-  const frontendUrl = process.env["FRONTEND_URL"];
 
   const origins: string[] = [];
 
-// Allow localhost during development
-if (nodeEnv === "development") {
+  // Allow localhost during development
+  if (nodeEnv === "development") {
+    origins.push(
+      "http://localhost:3000",
+      "http://localhost:5173",
+      "http://127.0.0.1:3000",
+      "http://127.0.0.1:5173"
+    );
+  }
+
+  // Allow Vercel frontend
   origins.push(
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:5173"
+    "https://seed-sower-lmc.vercel.app"
   );
-}
 
-// Allow production frontend
-origins.push(
-  "https://your-vercel-app.vercel.app"
-);
-
-return {
-  origin: origins,
-  credentials: true,
-};
+  return {
+    origin: origins,
+    credentials: true,
+  };
 };
 
 app.use(
@@ -53,7 +52,13 @@ app.use(
     },
   }),
 );
+
+// CORS must be before routes
 app.use(cors(getCorsOptions()));
+
+// Handle preflight requests
+app.options("*", cors(getCorsOptions()));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
