@@ -71,12 +71,16 @@ app.use(
 const corsOptions = getCorsOptions();
 app.use(cors(corsOptions));
 
-// Ensure explicit preflight handling for all routes
-app.options("*", cors(corsOptions));
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
+
+// 404 handler (Express 5 compatible)
+app.use((req, res) => {
+  res.status(404).json({
+    message: "Route not found",
+  });
+});
 
 export default app;
