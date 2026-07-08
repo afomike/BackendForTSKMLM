@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: e-learning-api
+    env: node
+    plan: starter
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: FRONTEND_URL
+        sync: false
+      - key: GCP_PROJECT_ID
+        sync: false
+      - key: GCP_BUCKET_NAME
+        sync: false
