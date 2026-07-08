@@ -1,4 +1,15 @@
 import util from "node:util";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
+import { db, pool } from "./lib/db.js";
+
+async function runMigrations() {
+  try {
+    await migrate(db, { migrationsFolder: "./drizzle" });
+  } catch (error) {
+    console.error("Database migration failed:", error);
+    throw error;
+  }
+}
 
 // Surface non-Error throws during development for easier debugging
 process.on("uncaughtException", (err) => {
@@ -20,6 +31,8 @@ async function main() {
       import("./app.js"),
       import("./lib/logger.js"),
     ]);
+
+    await runMigrations();
 
     const rawPort = process.env["PORT"] ?? "3000";
     const port = Number(rawPort);

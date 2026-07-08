@@ -13,6 +13,9 @@
     "start": "node --enable-source-maps ./dist/index.mjs",
     "create-admin": "node --env-file-if-exists=.env --loader ts-node/esm ./src/scripts/create-admin.ts",
     "delete-user": "node --env-file-if-exists=.env --loader ts-node/esm ./src/scripts/delete-user.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -37,6 +40,7 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^25.6.2",
+    "drizzle-kit": "^0.31.10",
     "esbuild": "0.25.8",
     "esbuild-plugin-pino": "^2.3.3",
     "nodemon": "^3.1.14",

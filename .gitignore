@@ -4,8 +4,15 @@ dist
 .tsbuildinfo
 .env
 .env.local
+.env.*
+!.env.example
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 .DS_Store
+*.log
+*.sqlite
+*.sqlite3
+/drizzle/*.sql
+!/drizzle/0000_lucky_blazing_skull.sql

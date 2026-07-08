@@ -7,7 +7,7 @@ This repository is a Node.js + TypeScript backend for an e-learning platform. It
 - Serves API endpoints under `/api`
 - Connects to a PostgreSQL database
 - Uses JSON Web Tokens for authentication
-- Supports file storage configuration through Google Cloud Storage
+- Supports file storage configuration through Cloudinary
 - Builds a production bundle with `esbuild`
 
 ## Getting started for beginners
@@ -40,6 +40,19 @@ npm run build
 npm run start
 ```
 
+### 6. Generate and apply database migrations
+
+```bash
+npm run db:generate
+npm run db:migrate
+```
+
+If you prefer to sync the schema directly without generating SQL files, you can use:
+
+```bash
+npm run db:push
+```
+
 ## Render deployment
 
 This project includes a `render.yaml` manifest for Render.
@@ -64,10 +77,16 @@ This project includes a `render.yaml` manifest for Render.
 - `FRONTEND_URL`
   - Optional URL for your frontend application.
   - Used by CORS configuration.
-- `GCP_PROJECT_ID`
-  - Optional if using Google Cloud Storage for uploads.
-- `GCP_BUCKET_NAME`
-  - Optional if using Google Cloud Storage for uploads.
+- `CLOUDINARY_CLOUD_NAME`
+  - Required for Cloudinary uploads.
+- `CLOUDINARY_API_KEY`
+  - Required for Cloudinary uploads.
+- `CLOUDINARY_API_SECRET`
+  - Required for Cloudinary uploads.
+- `CLOUDINARY_UPLOAD_PRESET`
+  - Optional but recommended for unsigned uploads.
+- `CLOUDINARY_FOLDER`
+  - Optional folder name for uploaded assets.
 
 > If you are using Neon, you can also set `NEON_DATABASE_URL` instead of `DATABASE_URL`.
 
@@ -103,6 +122,12 @@ This file connects to PostgreSQL.
 - Uses `NEON_DATABASE_URL` in production if set.
 - Throws an error if neither is configured.
 
+### `drizzle.config.ts`
+
+This file configures Drizzle Kit for generating and applying migrations.
+- Reads the database connection from `DATABASE_URL` or `NEON_DATABASE_URL`.
+- Stores generated SQL files in the `drizzle/` folder.
+
 ### `src/routes/` folder
 
 This folder contains the API route definitions.
@@ -129,6 +154,7 @@ This is the Render deployment manifest.
 - The app relies on a PostgreSQL database, so `DATABASE_URL` must be valid.
 - If you see an error like `No database connection string configured`, set `DATABASE_URL` or `NEON_DATABASE_URL` in `.env`.
 - The server uses environment variables to control behavior, so the `.env` file is very important.
+- Migrations are applied automatically on startup, but you can also run them manually with `npm run db:migrate`.
 
 ## Recommended next steps
 

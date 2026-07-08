@@ -17,7 +17,13 @@ services:
         value: 10000
       - key: FRONTEND_URL
         sync: false
-      - key: GCP_PROJECT_ID
+      - key: CLOUDINARY_CLOUD_NAME
         sync: false
-      - key: GCP_BUCKET_NAME
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_UPLOAD_PRESET
+        sync: false
+      - key: CLOUDINARY_FOLDER
         sync: false
