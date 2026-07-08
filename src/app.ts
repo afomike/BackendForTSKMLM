@@ -56,9 +56,6 @@ app.use(
 // CORS must be before routes
 app.use(cors(getCorsOptions()));
 
-// Handle preflight requests
-app.options("*", cors(getCorsOptions()));
-
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
