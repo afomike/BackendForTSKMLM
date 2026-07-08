@@ -13,20 +13,25 @@ const getCorsOptions = () => {
 
   const origins: string[] = [];
 
-  // Always allow localhost in development
-  if (nodeEnv === "development") {
-    origins.push("http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173");
-  }
+// Allow localhost during development
+if (nodeEnv === "development") {
+  origins.push(
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173"
+  );
+}
 
-  // Add configured frontend URL if provided
-  if (frontendUrl) {
-    origins.push(frontendUrl);
-  }
+// Allow production frontend
+origins.push(
+  "https://your-vercel-app.vercel.app"
+);
 
-  return {
-    origin: origins.length > 0 ? origins : true, // Allow all if no specific origins configured
-    credentials: true,
-  };
+return {
+  origin: origins,
+  credentials: true,
+};
 };
 
 app.use(
