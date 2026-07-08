@@ -22,15 +22,29 @@ const getCorsOptions = () => {
     );
   }
 
-  // Allow Vercel frontend
-  origins.push(
-    "https://seed-sower-lmc.vercel.app"
-  );
+  // Allow Vercel frontend and any FRONTEND_URL configured
+  const vercelFrontend = "https://seed-sower-lmc.vercel.app";
+  origins.push(vercelFrontend);
+  if (process.env.FRONTEND_URL) {
+    origins.push(process.env.FRONTEND_URL);
+  }
 
-  return {
-    origin: origins,
+  const allowedOrigins = Array.from(new Set(origins.filter(Boolean)));
+
+  const corsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      // Allow non-browser or same-origin requests with no Origin header
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(null, false);
+    },
     credentials: true,
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"] as string[],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"] as string[],
+    optionsSuccessStatus: 204,
   };
+
+  return corsOptions;
 };
 
 app.use(
@@ -54,7 +68,11 @@ app.use(
 );
 
 // CORS must be before routes
-app.use(cors(getCorsOptions()));
+const corsOptions = getCorsOptions();
+app.use(cors(corsOptions));
+
+// Ensure explicit preflight handling for all routes
+app.options("*", cors(corsOptions));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
