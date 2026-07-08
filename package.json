@@ -26,6 +26,7 @@
     "drizzle-orm": "^0.45.2",
     "drizzle-zod": "^0.8.3",
     "esbuild": "^0.25.8",
+    "esbuild-plugin-pino": "^2.3.3",
     "express": "^5.2.1",
     "google-auth-library": "^10.7.0",
     "jsonwebtoken": "^9.0.3",
