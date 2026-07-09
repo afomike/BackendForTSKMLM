@@ -5,7 +5,7 @@ import { requireAuth, requireAdmin } from "../lib/auth.js";
 
 const router = Router();
 
-router.get("/stats/admin", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/admin/stats", requireAdmin, async (_req, res): Promise<void> => {
   const [studentCount] = await db
     .select({ count: count() })
     .from(usersTable)
