@@ -9,7 +9,7 @@ import {
 
 const router = Router();
 
-router.get("/users", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
   const users = await db.select().from(usersTable).orderBy(usersTable.createdAt);
 
   const enriched = await Promise.all(
@@ -46,7 +46,7 @@ router.get("/users", requireAdmin, async (_req, res): Promise<void> => {
   res.json(enriched);
 });
 
-router.patch("/users/:id/status", requireAdmin, async (req, res): Promise<void> => {
+router.patch("/admin/users/:id/status", requireAdmin, async (req, res): Promise<void> => {
   const params = UpdateUserStatusParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
