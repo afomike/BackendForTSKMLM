@@ -137,7 +137,7 @@ router.get("/stats/student", requireAuth, async (req, res): Promise<void> => {
   });
 });
 
-router.get("/stats/courses/popular", requireAdmin, async (_req, res): Promise<void> => {
+router.get("/admin/popular-courses", requireAdmin, async (_req, res): Promise<void> => {
   const courses = await db.select().from(coursesTable).orderBy(coursesTable.createdAt);
 
   const withStats = await Promise.all(
