@@ -70,7 +70,7 @@ router.get("/admin/stats", requireAdmin, async (_req, res): Promise<void> => {
   });
 });
 
-router.get("/stats/student", requireAuth, async (req, res): Promise<void> => {
+router.get("/student/stats", requireAuth, async (req, res): Promise<void> => {
   const enrollments = await db
     .select({ courseId: enrollmentsTable.courseId })
     .from(enrollmentsTable)
