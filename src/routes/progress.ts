@@ -3,21 +3,19 @@ import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable } f
 import { eq, and } from "drizzle-orm";
 import { requireAuth } from "../lib/auth.js";
 import {
-  CompleteLessonBody,
   GetCourseProgressParams,
   GetCertificateParams,
 } from "../lib/api-zod.js";
 
 const router = Router();
 
-router.post("/progress/complete", requireAuth, async (req, res): Promise<void> => {
-  const parsed = CompleteLessonBody.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: parsed.error.message });
-    return;
-  }
-
-  const { lessonId } = parsed.data;
+// ---------------------------------------------------------------------------
+// POST /api/lessons/:id/complete
+// (was: POST /progress/complete with lessonId in body — now matches frontend,
+// lessonId comes from the URL param)
+// ---------------------------------------------------------------------------
+router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void> => {
+  const lessonId = req.params.id;
 
   // check lesson exists
   const [lesson] = await db
@@ -62,7 +60,64 @@ router.post("/progress/complete", requireAuth, async (req, res): Promise<void> =
   res.json({ message: "Lesson marked as completed" });
 });
 
-router.get("/progress/me", requireAuth, async (req, res): Promise<void> => {
+// ---------------------------------------------------------------------------
+// PATCH /api/lessons/:id/progress
+// (new — frontend called this but backend had no matching route at all)
+// ---------------------------------------------------------------------------
+router.patch("/lessons/:id/progress", requireAuth, async (req, res): Promise<void> => {
+  const lessonId = req.params.id;
+  const { completed } = req.body ?? {};
+
+  // check lesson exists
+  const [lesson] = await db
+    .select()
+    .from(lessonsTable)
+    .where(eq(lessonsTable.id, lessonId));
+
+  if (!lesson) {
+    res.status(404).json({ error: "Lesson not found" });
+    return;
+  }
+
+  // check enrolled
+  const [enrollment] = await db
+    .select()
+    .from(enrollmentsTable)
+    .where(
+      and(
+        eq(enrollmentsTable.userId, req.userId!),
+        eq(enrollmentsTable.courseId, lesson.courseId)
+      )
+    );
+
+  if (!enrollment) {
+    res.status(403).json({ error: "Not enrolled in this course" });
+    return;
+  }
+
+  const isCompleted = Boolean(completed);
+
+  await db
+    .insert(userProgressTable)
+    .values({
+      userId: req.userId!,
+      lessonId,
+      completed: isCompleted,
+      completedAt: isCompleted ? new Date() : null,
+    })
+    .onConflictDoUpdate({
+      target: [userProgressTable.userId, userProgressTable.lessonId],
+      set: { completed: isCompleted, completedAt: isCompleted ? new Date() : null },
+    });
+
+  res.json({ message: "Progress updated", completed: isCompleted });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/student/progress
+// (was: GET /progress/me — renamed to match frontend's useGetMyProgress)
+// ---------------------------------------------------------------------------
+router.get("/student/progress", requireAuth, async (req, res): Promise<void> => {
   const enrollments = await db
     .select({
       courseId: enrollmentsTable.courseId,
@@ -138,7 +193,11 @@ router.get("/progress/me", requireAuth, async (req, res): Promise<void> => {
   });
 });
 
-router.get("/progress/course/:courseId", requireAuth, async (req, res): Promise<void> => {
+// ---------------------------------------------------------------------------
+// GET /api/courses/:courseId/progress
+// (was: GET /progress/course/:courseId — renamed for consistency with the
+// ---------------------------------------------------------------------------
+router.get("/courses/:courseId/progress", requireAuth, async (req, res): Promise<void> => {
   const params = GetCourseProgressParams.safeParse(req.params);
   if (!params.success) {
     res.status(400).json({ error: params.error.message });
@@ -196,6 +255,10 @@ router.get("/progress/course/:courseId", requireAuth, async (req, res): Promise<
   });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/certificates/:courseId
+// (unchanged — already matched the frontend)
+// ---------------------------------------------------------------------------
 router.get("/certificates/:courseId", requireAuth, async (req, res): Promise<void> => {
   const params = GetCertificateParams.safeParse(req.params);
   if (!params.success) {
