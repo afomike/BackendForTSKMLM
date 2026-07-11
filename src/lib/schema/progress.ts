@@ -1,4 +1,4 @@
-import { boolean, pgTable, timestamp, uuid } from "drizzle-orm/pg-core";
+import { boolean, pgTable, timestamp, uuid, unique } from "drizzle-orm/pg-core";
 
 export const userProgressTable = pgTable("user_progress", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -7,4 +7,6 @@ export const userProgressTable = pgTable("user_progress", {
   completed: boolean("completed").notNull().default(false),
   completedAt: timestamp("completed_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => ({
+  userLessonUnique: unique("user_progress_user_lesson_unique").on(table.userId, table.lessonId),
+}));
