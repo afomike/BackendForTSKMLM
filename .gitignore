@@ -14,5 +14,4 @@ pnpm-debug.log*
 *.log
 *.sqlite
 *.sqlite3
-/drizzle/*.sql
 !/drizzle/0000_lucky_blazing_skull.sql
