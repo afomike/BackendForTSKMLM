@@ -101,13 +101,21 @@ export class ObjectStorageService {
       throw new Error("CLOUDINARY_CLOUD_NAME not set");
     }
 
+    const uploadPreset = process.env.CLOUDINARY_UPLOAD_PRESET;
+    if (!uploadPreset) {
+      throw new Error("CLOUDINARY_UPLOAD_PRESET not set");
+    }
+
     const privateObjectDir = this.getPrivateObjectDir();
     const objectId = randomUUID();
     const folder = privateObjectDir ? `folder=${encodeURIComponent(privateObjectDir)}` : "";
     const publicId = privateObjectDir
       ? `public_id=${encodeURIComponent(`${privateObjectDir}/uploads/${objectId}`)}`
       : `public_id=${encodeURIComponent(`uploads/${objectId}`)}`;
-    const params = [folder, publicId].filter(Boolean).join("&");
+    // Browser uploads use Cloudinary's unsigned-upload flow. An API key must
+    // never be sent by the browser; the upload preset authorizes the request.
+    const preset = `upload_preset=${encodeURIComponent(uploadPreset)}`;
+    const params = [preset, folder, publicId].filter(Boolean).join("&");
 
     return `https://api.cloudinary.com/v1_1/${cloudName}/upload${params ? `?${params}` : ""}`;
   }
