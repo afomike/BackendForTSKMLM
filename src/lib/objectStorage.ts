@@ -117,7 +117,7 @@ export class ObjectStorageService {
     const preset = `upload_preset=${encodeURIComponent(uploadPreset)}`;
     const params = [preset, folder, publicId].filter(Boolean).join("&");
 
-    return `https://api.cloudinary.com/v1_1/${cloudName}/upload${params ? `?${params}` : ""}`;
+    return `https://api.cloudinary.com/v1_1/${cloudName}/auto/upload${params ? `?${params}` : ""}`;
   }
 
   async getObjectEntityFile(objectPath: string): Promise<StoredObject> {
