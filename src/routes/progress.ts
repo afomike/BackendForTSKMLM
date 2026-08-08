@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable, quizzesTable, quizAttemptsTable } from "../lib/db.js";
+import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable, quizzesTable, quizAttemptsTable, assignmentSubmissionsTable } from "../lib/db.js";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "../lib/auth.js";
 import {
