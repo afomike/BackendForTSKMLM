@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable } from "../lib/db.js";
-import { eq, and } from "drizzle-orm";
+import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable, quizzesTable, quizAttemptsTable } from "../lib/db.js";
+import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "../lib/auth.js";
 import {
   GetCourseProgressParams,
@@ -8,6 +8,30 @@ import {
 } from "../lib/api-zod.js";
 
 const router = Router();
+
+async function hasPassedLessonQuiz(userId: string, lessonId: string): Promise<boolean> {
+  const [quiz] = await db
+    .select()
+    .from(quizzesTable)
+    .where(eq(quizzesTable.lessonId, lessonId));
+
+  if (!quiz) {
+    return true;
+  }
+
+  const [bestAttempt] = await db
+    .select()
+    .from(quizAttemptsTable)
+    .where(
+      and(
+        eq(quizAttemptsTable.quizId, quiz.id),
+        eq(quizAttemptsTable.userId, userId)
+      )
+    )
+    .orderBy(desc(quizAttemptsTable.score));
+
+  return !!bestAttempt?.passed;
+}
 
 // ---------------------------------------------------------------------------
 // POST /api/lessons/:id/complete
@@ -41,6 +65,12 @@ router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void
 
   if (!enrollment) {
     res.status(403).json({ error: "Not enrolled in this course" });
+    return;
+  }
+
+  const quizPassed = await hasPassedLessonQuiz(req.userId!, lessonId);
+  if (!quizPassed) {
+    res.status(403).json({ error: "You must pass the lesson quiz before marking this lesson complete." });
     return;
   }
 
@@ -96,6 +126,14 @@ router.patch("/lessons/:id/progress", requireAuth, async (req, res): Promise<voi
   }
 
   const isCompleted = Boolean(completed);
+
+  if (isCompleted) {
+    const quizPassed = await hasPassedLessonQuiz(req.userId!, lessonId);
+    if (!quizPassed) {
+      res.status(403).json({ error: "You must pass the lesson quiz before marking this lesson complete." });
+      return;
+    }
+  }
 
   await db
     .insert(userProgressTable)
