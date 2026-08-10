@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db, coursesTable, lessonsTable, enrollmentsTable, userProgressTable, assignmentSubmissionsTable, usersTable } from "../lib/db.js";
-import { eq, and, count } from "drizzle-orm";
+import { eq, and, count, desc, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin } from "../lib/auth.js";
 import { GetCourseParams } from "../lib/api-zod.js";
 
@@ -43,13 +43,11 @@ async function ensureCourseCompletion(userId: string, courseId: string) {
 }
 
 router.get("/courses/:courseId/assignment", requireAuth, async (req, res): Promise<void> => {
-  const params = GetCourseParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
+  const courseId = Array.isArray(req.params.courseId) ? req.params.courseId[0] : req.params.courseId;
+  if (!courseId) {
+    res.status(400).json({ error: "Course id is required" });
     return;
   }
-
-  const { courseId } = params.data;
 
   const [course] = await db.select().from(coursesTable).where(eq(coursesTable.id, courseId));
   if (!course) {
@@ -106,9 +104,9 @@ router.get("/courses/:courseId/assignment", requireAuth, async (req, res): Promi
 });
 
 router.post("/courses/:courseId/assignment", requireAuth, async (req, res): Promise<void> => {
-  const params = GetCourseParams.safeParse(req.params);
-  if (!params.success) {
-    res.status(400).json({ error: params.error.message });
+  const courseId = Array.isArray(req.params.courseId) ? req.params.courseId[0] : req.params.courseId;
+  if (!courseId) {
+    res.status(400).json({ error: "Course id is required" });
     return;
   }
 
@@ -118,7 +116,6 @@ router.post("/courses/:courseId/assignment", requireAuth, async (req, res): Prom
     return;
   }
 
-  const { courseId } = params.data;
   const { submissionUrl } = requestBody;
 
   const [course] = await db.select().from(coursesTable).where(eq(coursesTable.id, courseId));
@@ -190,13 +187,13 @@ router.post("/courses/:courseId/assignment", requireAuth, async (req, res): Prom
 });
 
 router.get("/admin/assignments", requireAdmin, async (_req, res): Promise<void> => {
-  const submissions = await db.select().from(assignmentSubmissionsTable).orderBy(assignmentSubmissionsTable.createdAt.desc());
+  const submissions = await db.select().from(assignmentSubmissionsTable).orderBy(desc(assignmentSubmissionsTable.createdAt));
 
   const userIds = Array.from(new Set(submissions.map((submission) => submission.userId)));
   const courseIds = Array.from(new Set(submissions.map((submission) => submission.courseId)));
 
-  const users = await db.select().from(usersTable).where((usersTable) => usersTable.id.in(userIds));
-  const courses = await db.select().from(coursesTable).where((coursesTable) => coursesTable.id.in(courseIds));
+  const users = userIds.length > 0 ? await db.select().from(usersTable).where(inArray(usersTable.id, userIds)) : [];
+  const courses = courseIds.length > 0 ? await db.select().from(coursesTable).where(inArray(coursesTable.id, courseIds)) : [];
 
   const userMap = new Map(users.map((user) => [user.id, user]));
   const courseMap = new Map(courses.map((course) => [course.id, course]));

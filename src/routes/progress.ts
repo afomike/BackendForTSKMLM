@@ -39,7 +39,11 @@ async function hasPassedLessonQuiz(userId: string, lessonId: string): Promise<bo
 // lessonId comes from the URL param)
 // ---------------------------------------------------------------------------
 router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void> => {
-  const lessonId = req.params.id;
+  const lessonId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!lessonId) {
+    res.status(400).json({ error: "Lesson id is required" });
+    return;
+  }
 
   // check lesson exists
   const [lesson] = await db
@@ -95,7 +99,12 @@ router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void
 // (new — frontend called this but backend had no matching route at all)
 // ---------------------------------------------------------------------------
 router.patch("/lessons/:id/progress", requireAuth, async (req, res): Promise<void> => {
-  const lessonId = req.params.id;
+  const lessonId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  if (!lessonId) {
+    res.status(400).json({ error: "Lesson id is required" });
+    return;
+  }
+
   const { completed } = req.body ?? {};
 
   // check lesson exists

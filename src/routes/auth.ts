@@ -20,37 +20,50 @@ router.post("/auth/register", async (req, res): Promise<void> => {
 
   const { fullname, email, password } = parsed.data;
 
-  const existing = await db
-    .select({ id: usersTable.id })
-    .from(usersTable)
-    .where(eq(usersTable.email, email));
+  try {
+    const [user] = await db.transaction(async (tx) => {
+      const existing = await tx
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(eq(usersTable.email, email));
 
-  if (existing.length > 0) {
-    res.status(409).json({ error: "Email already in use" });
-    return;
+      if (existing.length > 0) {
+        throw Object.assign(new Error("Email already in use"), { statusCode: 409 });
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      const [createdUser] = await tx
+        .insert(usersTable)
+        .values({ fullname, email, passwordHash, role: "student" })
+        .returning();
+
+      return [createdUser];
+    });
+
+    const token = signToken({ userId: user.id, role: user.role });
+
+    res.status(201).json({
+      token,
+      user: {
+        id: user.id,
+        fullname: user.fullname,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        avatarUrl: user.avatarUrl ?? null,
+        createdAt: user.createdAt.toISOString(),
+      },
+    });
+  } catch (error) {
+    const statusCode = error instanceof Error && "statusCode" in error ? Number((error as { statusCode?: number }).statusCode) : 500;
+    if (statusCode === 409) {
+      res.status(409).json({ error: "Email already in use" });
+      return;
+    }
+
+    res.status(500).json({ error: "Registration failed" });
   }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  const [user] = await db
-    .insert(usersTable)
-    .values({ fullname, email, passwordHash, role: "student" })
-    .returning();
-
-  const token = signToken({ userId: user.id, role: user.role });
-
-  res.status(201).json({
-    token,
-    user: {
-      id: user.id,
-      fullname: user.fullname,
-      email: user.email,
-      role: user.role,
-      status: user.status,
-      avatarUrl: user.avatarUrl ?? null,
-      createdAt: user.createdAt.toISOString(),
-    },
-  });
 });
 
 router.post("/auth/login", async (req, res): Promise<void> => {

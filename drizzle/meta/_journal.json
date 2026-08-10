@@ -15,6 +15,13 @@
       "when": 1783783877859,
       "tag": "0001_last_stone_men",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786381550406,
+      "tag": "0002_production_db_layer_hardening",
+      "breakpoints": true
     }
   ]
 }

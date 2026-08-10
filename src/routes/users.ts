@@ -9,8 +9,20 @@ import {
 
 const router = Router();
 
-router.get("/admin/users", requireAdmin, async (_req, res): Promise<void> => {
-  const users = await db.select().from(usersTable).orderBy(usersTable.createdAt);
+router.get("/admin/users", requireAdmin, async (req, res): Promise<void> => {
+  const page = Number(req.query.page ?? 1);
+  const limit = Number(req.query.limit ?? 0);
+  const hasPagination = Number.isInteger(page) && page > 0 && Number.isInteger(limit) && limit > 0;
+
+  const baseQuery = db.select().from(usersTable).orderBy(usersTable.createdAt);
+  const users = hasPagination ? await baseQuery.limit(limit).offset((page - 1) * limit) : await baseQuery;
+
+  if (hasPagination) {
+    const [totalResult] = await db.select({ count: count() }).from(usersTable);
+    res.set("X-Total-Count", String(totalResult?.count ?? 0));
+    res.set("X-Page", String(page));
+    res.set("X-Page-Size", String(limit));
+  }
 
   const enriched = await Promise.all(
     users.map(async (user) => {

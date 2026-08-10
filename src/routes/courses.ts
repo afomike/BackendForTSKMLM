@@ -57,8 +57,14 @@ function serializeLessonParts(
 router.get("/courses", optionalAuth, async (req, res): Promise<void> => {
   const params = ListCoursesQueryParams.safeParse(req.query);
   const search = params.success ? params.data.search : undefined;
+  const requestedPage = params.success ? params.data.page : undefined;
+  const requestedLimit = params.success ? params.data.limit : undefined;
 
-  const baseQuery = db
+  const page = requestedPage ?? 1;
+  const limit = requestedLimit ?? undefined;
+  const offset = limit ? (page - 1) * limit : 0;
+
+  const query = db
     .select({
       id: coursesTable.id,
       title: coursesTable.title,
@@ -72,9 +78,11 @@ router.get("/courses", optionalAuth, async (req, res): Promise<void> => {
     .groupBy(coursesTable.id)
     .orderBy(coursesTable.createdAt);
 
+  const paginatedQuery = limit ? query.limit(limit).offset(offset) : query;
+
   let courses;
   if (search) {
-    courses = await db
+    const filteredQuery = db
       .select({
         id: coursesTable.id,
         title: coursesTable.title,
@@ -88,8 +96,10 @@ router.get("/courses", optionalAuth, async (req, res): Promise<void> => {
       .where(ilike(coursesTable.title, `%${search}%`))
       .groupBy(coursesTable.id)
       .orderBy(coursesTable.createdAt);
+
+    courses = limit ? await filteredQuery.limit(limit).offset(offset) : await filteredQuery;
   } else {
-    courses = await baseQuery;
+    courses = await paginatedQuery;
   }
 
   // get enrollment counts
@@ -102,6 +112,16 @@ router.get("/courses", optionalAuth, async (req, res): Promise<void> => {
     .groupBy(enrollmentsTable.courseId);
 
   const enrollMap = new Map(enrollmentCounts.map((e) => [e.courseId, e.count]));
+
+  if (limit) {
+    const [totalResult] = await db
+      .select({ count: count() })
+      .from(coursesTable)
+      .where(search ? ilike(coursesTable.title, `%${search}%`) : undefined);
+    res.set("X-Total-Count", String(totalResult?.count ?? 0));
+    res.set("X-Page", String(page));
+    res.set("X-Page-Size", String(limit));
+  }
 
   res.json(
     courses.map((c) => ({

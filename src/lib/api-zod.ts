@@ -17,7 +17,9 @@ export const UpdateProfileBody = z.object({
 });
 
 export const ListCoursesQueryParams = z.object({
-  search: z.coerce.string().optional(),
+  search: z.coerce.string().trim().optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
 export const CreateCourseBody = z.object({

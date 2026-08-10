@@ -1,7 +1,11 @@
 import jwt from "jsonwebtoken";
 import { Request, Response, NextFunction } from "express";
 
-const JWT_SECRET = process.env.SESSION_SECRET ?? "elearn-secret-key";
+const JWT_SECRET = process.env.SESSION_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("Missing required environment variable: SESSION_SECRET");
+}
 
 export interface JwtPayload {
   userId: string;

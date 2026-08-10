@@ -19,14 +19,22 @@ router.put("/settings", requireAuth, requireAdmin, async (req, res) => {
     res.status(400).json({ error: "Body must be a JSON object of key-value pairs" });
     return;
   }
-  for (const [key, value] of Object.entries(updates)) {
-    if (typeof value !== "string") continue;
-    await db
-      .insert(siteSettingsTable)
-      .values({ key, value })
-      .onConflictDoUpdate({ target: siteSettingsTable.key, set: { value, updatedAt: new Date() } });
+
+  try {
+    await db.transaction(async (tx) => {
+      for (const [key, value] of Object.entries(updates)) {
+        if (typeof value !== "string") continue;
+        await tx
+          .insert(siteSettingsTable)
+          .values({ key, value })
+          .onConflictDoUpdate({ target: siteSettingsTable.key, set: { value, updatedAt: new Date() } });
+      }
+    });
+
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: "Failed to update site settings" });
   }
-  res.json({ ok: true });
 });
 
 export default router;
