@@ -212,6 +212,15 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
     return;
   }
 
+  let completedPartIndexes: number[] = [];
+  if (req.userId) {
+    const [progress] = await db
+      .select({ completedParts: userProgressTable.completedParts })
+      .from(userProgressTable)
+      .where(and(eq(userProgressTable.userId, req.userId), eq(userProgressTable.lessonId, lesson.id)));
+    completedPartIndexes = progress?.completedParts ?? [];
+  }
+
   res.json({
     id: lesson.id,
     courseId: lesson.courseId,
@@ -226,6 +235,7 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
       duration: lesson.duration,
     }),
     duration: lesson.duration ?? null,
+    completedPartIndexes,
     createdAt: lesson.createdAt.toISOString(),
   });
 });

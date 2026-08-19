@@ -94,6 +94,52 @@ router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void
   res.json({ message: "Lesson marked as completed" });
 });
 
+router.post("/lessons/:id/parts/:partIndex/complete", requireAuth, async (req, res): Promise<void> => {
+  const lessonId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const partIndex = Number(Array.isArray(req.params.partIndex) ? req.params.partIndex[0] : req.params.partIndex);
+  if (!lessonId || !Number.isInteger(partIndex) || partIndex < 0) {
+    res.status(400).json({ error: "Lesson id and a valid part index are required" });
+    return;
+  }
+
+  const [lesson] = await db.select().from(lessonsTable).where(eq(lessonsTable.id, lessonId));
+  if (!lesson) {
+    res.status(404).json({ error: "Lesson not found" });
+    return;
+  }
+
+  const [enrollment] = await db
+    .select()
+    .from(enrollmentsTable)
+    .where(and(eq(enrollmentsTable.userId, req.userId!), eq(enrollmentsTable.courseId, lesson.courseId)));
+  if (!enrollment) {
+    res.status(403).json({ error: "Not enrolled in this course" });
+    return;
+  }
+
+  const partCount = Array.isArray(lesson.parts) && lesson.parts.length > 0 ? lesson.parts.length : 1;
+  if (partIndex >= partCount) {
+    res.status(400).json({ error: "Part index is out of range" });
+    return;
+  }
+
+  const [existing] = await db
+    .select()
+    .from(userProgressTable)
+    .where(and(eq(userProgressTable.userId, req.userId!), eq(userProgressTable.lessonId, lessonId)));
+  const completedParts = Array.from(new Set([...(existing?.completedParts ?? []), partIndex])).sort((a, b) => a - b);
+
+  await db
+    .insert(userProgressTable)
+    .values({ userId: req.userId!, lessonId, completedParts })
+    .onConflictDoUpdate({
+      target: [userProgressTable.userId, userProgressTable.lessonId],
+      set: { completedParts },
+    });
+
+  res.json({ completedPartIndexes: completedParts });
+});
+
 // ---------------------------------------------------------------------------
 // PATCH /api/lessons/:id/progress
 // (new — frontend called this but backend had no matching route at all)
