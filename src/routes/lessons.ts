@@ -1,11 +1,14 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import { db, lessonsTable, enrollmentsTable, userProgressTable } from "../lib/db.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, asc, gte, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin, optionalAuth } from "../lib/auth.js";
 import {
   ListLessonsParams,
   CreateLessonParams,
   CreateLessonBody,
+  ReorderLessonsParams,
+  ReorderLessonsBody,
   GetLessonParams,
   UpdateLessonParams,
   UpdateLessonBody,
@@ -20,6 +23,7 @@ function asContentType(v: unknown): "video" | "audio" | "pdf" {
 }
 
 type LessonPart = {
+  partId: string;
   title: string;
   contentType: string;
   fileUrl: string;
@@ -30,6 +34,7 @@ type LessonPart = {
 function cleanLessonParts(parts: Partial<LessonPart>[] | undefined): LessonPart[] {
   return (parts ?? [])
     .map((part) => ({
+      partId: part.partId ?? randomUUID(),
       title: part.title.trim(),
       contentType: part.contentType,
       fileUrl: part.fileUrl.trim(),
@@ -41,11 +46,13 @@ function cleanLessonParts(parts: Partial<LessonPart>[] | undefined): LessonPart[
 
 function serializeLessonParts(
   parts: unknown,
+  lessonId: string,
   fallback?: { title: string; contentType: "video" | "audio" | "pdf"; fileUrl: string; duration?: number | null },
 ): LessonPart[] {
   const serialized = Array.isArray(parts)
     ? (parts as Partial<LessonPart>[])
         .map((part, index) => ({
+          partId: part.partId ?? `legacy-${lessonId}-${index}`,
           title: part.title?.trim() || (index === 0 ? fallback?.title : undefined) || `Part ${index + 1}`,
           contentType: part.contentType ?? fallback?.contentType ?? "video",
           fileUrl: part.fileUrl?.trim() || fallback?.fileUrl || "",
@@ -57,6 +64,7 @@ function serializeLessonParts(
 
   if (serialized.length === 0 && fallback?.fileUrl) {
     return [{
+      partId: `legacy-${lessonId}-0`,
       title: fallback.title,
       contentType: fallback.contentType,
       fileUrl: fallback.fileUrl,
@@ -79,7 +87,7 @@ router.get("/courses/:courseId/lessons", optionalAuth, async (req, res): Promise
     .select()
     .from(lessonsTable)
     .where(eq(lessonsTable.courseId, courseId))
-    .orderBy(lessonsTable.lessonOrder);
+    .orderBy(asc(lessonsTable.lessonOrder));
 
   let completedLessonIds = new Set<string>();
   let completedAtMap = new Map<string, string | null>();
@@ -126,7 +134,7 @@ router.get("/courses/:courseId/lessons", optionalAuth, async (req, res): Promise
       lessonOrder: lesson.lessonOrder,
       contentType: asContentType(lesson.contentType),
       fileUrl: lesson.fileUrl,
-      parts: serializeLessonParts(lesson.parts, {
+      parts: serializeLessonParts(lesson.parts, lesson.id, {
         title: lesson.title,
         contentType: asContentType(lesson.contentType),
         fileUrl: lesson.fileUrl,
@@ -164,18 +172,32 @@ router.post("/courses/:courseId/lessons", requireAdmin, async (req, res): Promis
 
   const firstPart = parts[0];
 
-  const [lesson] = await db
-    .insert(lessonsTable)
-    .values({
-      courseId: params.data.courseId,
-      title: parsed.data.title,
-      lessonOrder: parsed.data.lessonOrder,
-      contentType: firstPart?.contentType ?? parsed.data.contentType ?? "video",
-      fileUrl: firstPart?.fileUrl ?? parsed.data.fileUrl ?? "",
-      parts,
-      duration: firstPart?.duration ?? parsed.data.duration ?? null,
-    })
-    .returning();
+  const [lesson] = await db.transaction(async (tx) => {
+    const insertOrder = Math.max(1, Math.floor(parsed.data.lessonOrder));
+    await tx
+      .update(lessonsTable)
+      .set({ lessonOrder: sql`${lessonsTable.lessonOrder} + 1000000` })
+      .where(and(eq(lessonsTable.courseId, params.data.courseId), gte(lessonsTable.lessonOrder, insertOrder)));
+
+    const [created] = await tx
+      .insert(lessonsTable)
+      .values({
+        courseId: params.data.courseId,
+        title: parsed.data.title,
+        lessonOrder: insertOrder,
+        contentType: firstPart?.contentType ?? parsed.data.contentType ?? "video",
+        fileUrl: firstPart?.fileUrl ?? parsed.data.fileUrl ?? "",
+        parts,
+        duration: firstPart?.duration ?? parsed.data.duration ?? null,
+      })
+      .returning();
+
+    await tx
+      .update(lessonsTable)
+      .set({ lessonOrder: sql`${lessonsTable.lessonOrder} - 999999` })
+      .where(and(eq(lessonsTable.courseId, params.data.courseId), gte(lessonsTable.lessonOrder, insertOrder + 1000000)));
+    return [created];
+  });
 
   res.status(201).json({
     id: lesson!.id,
@@ -184,7 +206,7 @@ router.post("/courses/:courseId/lessons", requireAdmin, async (req, res): Promis
     lessonOrder: lesson!.lessonOrder,
     contentType: asContentType(lesson!.contentType),
     fileUrl: lesson!.fileUrl,
-    parts: serializeLessonParts(lesson!.parts, {
+    parts: serializeLessonParts(lesson!.parts, lesson!.id, {
       title: lesson!.title,
       contentType: asContentType(lesson!.contentType),
       fileUrl: lesson!.fileUrl,
@@ -193,6 +215,42 @@ router.post("/courses/:courseId/lessons", requireAdmin, async (req, res): Promis
     duration: lesson!.duration ?? null,
     createdAt: lesson!.createdAt.toISOString(),
   });
+});
+
+router.patch("/courses/:courseId/lessons/reorder", requireAdmin, async (req, res): Promise<void> => {
+  const params = ReorderLessonsParams.safeParse(req.params);
+  const parsed = ReorderLessonsBody.safeParse(req.body);
+  if (!params.success || !parsed.success) {
+    res.status(400).json({ error: "A course id and ordered lesson ids are required" });
+    return;
+  }
+
+  const lessons = await db
+    .select({ id: lessonsTable.id })
+    .from(lessonsTable)
+    .where(eq(lessonsTable.courseId, params.data.courseId));
+  const existingIds = new Set(lessons.map((lesson) => lesson.id));
+  const lessonIds = parsed.data.lessonIds;
+  if (lessonIds.length !== existingIds.size || new Set(lessonIds).size !== lessonIds.length || lessonIds.some((id) => !existingIds.has(id))) {
+    res.status(400).json({ error: "The ordered lesson list must contain every lesson exactly once" });
+    return;
+  }
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(lessonsTable)
+      .set({ lessonOrder: sql`${lessonsTable.lessonOrder} + 1000000` })
+      .where(eq(lessonsTable.courseId, params.data.courseId));
+
+    for (const [index, lessonId] of lessonIds.entries()) {
+      await tx
+        .update(lessonsTable)
+        .set({ lessonOrder: index + 1 })
+        .where(and(eq(lessonsTable.id, lessonId), eq(lessonsTable.courseId, params.data.courseId)));
+    }
+  });
+
+  res.json({ lessonIds });
 });
 
 router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
@@ -212,13 +270,13 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
     return;
   }
 
-  let completedPartIndexes: number[] = [];
+  let completedPartIds: string[] = [];
   if (req.userId) {
     const [progress] = await db
       .select({ completedParts: userProgressTable.completedParts })
       .from(userProgressTable)
       .where(and(eq(userProgressTable.userId, req.userId), eq(userProgressTable.lessonId, lesson.id)));
-    completedPartIndexes = progress?.completedParts ?? [];
+    completedPartIds = progress?.completedParts ?? [];
   }
 
   res.json({
@@ -228,14 +286,14 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
     lessonOrder: lesson.lessonOrder,
     contentType: asContentType(lesson.contentType),
     fileUrl: lesson.fileUrl,
-    parts: serializeLessonParts(lesson.parts, {
+    parts: serializeLessonParts(lesson.parts, lesson.id, {
       title: lesson.title,
       contentType: asContentType(lesson.contentType),
       fileUrl: lesson.fileUrl,
       duration: lesson.duration,
     }),
     duration: lesson.duration ?? null,
-    completedPartIndexes,
+    completedPartIds,
     createdAt: lesson.createdAt.toISOString(),
   });
 });
@@ -293,7 +351,7 @@ router.patch("/lessons/:id", requireAdmin, async (req, res): Promise<void> => {
     lessonOrder: lesson.lessonOrder,
     contentType: asContentType(lesson.contentType),
     fileUrl: lesson.fileUrl,
-    parts: serializeLessonParts(lesson.parts, {
+    parts: serializeLessonParts(lesson.parts, lesson.id, {
       title: lesson.title,
       contentType: asContentType(lesson.contentType),
       fileUrl: lesson.fileUrl,

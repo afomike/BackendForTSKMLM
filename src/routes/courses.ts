@@ -20,6 +20,7 @@ function asContentType(v: unknown): "video" | "audio" | "pdf" {
 }
 
 type LessonPart = {
+  partId: string;
   title: string;
   contentType: string;
   fileUrl: string;
@@ -29,11 +30,13 @@ type LessonPart = {
 
 function serializeLessonParts(
   parts: unknown,
+  lessonId: string,
   fallback?: { title: string; contentType: "video" | "audio" | "pdf"; fileUrl: string; duration?: number | null },
 ): LessonPart[] {
   const serialized = Array.isArray(parts)
     ? (parts as Partial<LessonPart>[])
         .map((part, index) => ({
+          partId: part.partId ?? `legacy-${lessonId}-${index}`,
           title: part.title?.trim() || (index === 0 ? fallback?.title : undefined) || `Part ${index + 1}`,
           contentType: part.contentType ?? fallback?.contentType ?? "video",
           fileUrl: part.fileUrl?.trim() || fallback?.fileUrl || "",
@@ -45,6 +48,7 @@ function serializeLessonParts(
 
   if (serialized.length === 0 && fallback?.fileUrl) {
     return [{
+      partId: `legacy-${lessonId}-0`,
       title: fallback.title,
       contentType: fallback.contentType,
       fileUrl: fallback.fileUrl,
@@ -238,7 +242,7 @@ router.get("/courses/:id", optionalAuth, async (req, res): Promise<void> => {
       lessonOrder: lesson.lessonOrder,
       contentType: asContentType(lesson.contentType),
       fileUrl: lesson.fileUrl,
-      parts: serializeLessonParts(lesson.parts, {
+      parts: serializeLessonParts(lesson.parts, lesson.id, {
         title: lesson.title,
         contentType: asContentType(lesson.contentType),
         fileUrl: lesson.fileUrl,

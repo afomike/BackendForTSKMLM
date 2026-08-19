@@ -94,11 +94,11 @@ router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void
   res.json({ message: "Lesson marked as completed" });
 });
 
-router.post("/lessons/:id/parts/:partIndex/complete", requireAuth, async (req, res): Promise<void> => {
+router.post("/lessons/:id/parts/:partId/complete", requireAuth, async (req, res): Promise<void> => {
   const lessonId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-  const partIndex = Number(Array.isArray(req.params.partIndex) ? req.params.partIndex[0] : req.params.partIndex);
-  if (!lessonId || !Number.isInteger(partIndex) || partIndex < 0) {
-    res.status(400).json({ error: "Lesson id and a valid part index are required" });
+  const partId = Array.isArray(req.params.partId) ? req.params.partId[0] : req.params.partId;
+  if (!lessonId || !partId) {
+    res.status(400).json({ error: "Lesson id and part id are required" });
     return;
   }
 
@@ -117,9 +117,10 @@ router.post("/lessons/:id/parts/:partIndex/complete", requireAuth, async (req, r
     return;
   }
 
-  const partCount = Array.isArray(lesson.parts) && lesson.parts.length > 0 ? lesson.parts.length : 1;
-  if (partIndex >= partCount) {
-    res.status(400).json({ error: "Part index is out of range" });
+  const lessonParts = Array.isArray(lesson.parts) ? lesson.parts as Array<{ partId?: string }> : [];
+  const knownPartIds = lessonParts.map((part, index) => part.partId ?? `legacy-${lesson.id}-${index}`);
+  if (!knownPartIds.includes(partId)) {
+    res.status(400).json({ error: "Part id is not part of this lesson" });
     return;
   }
 
@@ -127,7 +128,14 @@ router.post("/lessons/:id/parts/:partIndex/complete", requireAuth, async (req, r
     .select()
     .from(userProgressTable)
     .where(and(eq(userProgressTable.userId, req.userId!), eq(userProgressTable.lessonId, lessonId)));
-  const completedParts = Array.from(new Set([...(existing?.completedParts ?? []), partIndex])).sort((a, b) => a - b);
+  const completedPartsSet = new Set<string>();
+  for (const savedPart of existing?.completedParts ?? []) {
+    if (typeof savedPart === "string" && knownPartIds.includes(savedPart)) {
+      completedPartsSet.add(savedPart);
+    }
+  }
+  completedPartsSet.add(partId);
+  const completedParts = Array.from(completedPartsSet);
 
   await db
     .insert(userProgressTable)

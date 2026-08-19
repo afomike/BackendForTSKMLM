@@ -59,6 +59,7 @@ export const CreateLessonParams = z.object({
 });
 
 export const LessonPartSchema = z.object({
+  partId: z.string().optional(),
   title: z.string().min(1),
   contentType: z.enum(["video", "audio", "pdf"]),
   fileUrl: z.string().min(1),
@@ -73,6 +74,14 @@ export const CreateLessonBody = z.object({
   fileUrl: z.string().optional(),
   parts: z.array(LessonPartSchema).min(1),
   duration: z.number().nullable().optional(),
+});
+
+export const ReorderLessonsParams = z.object({
+  courseId: z.coerce.string(),
+});
+
+export const ReorderLessonsBody = z.object({
+  lessonIds: z.array(z.string()).min(1),
 });
 
 export const GetLessonParams = z.object({
