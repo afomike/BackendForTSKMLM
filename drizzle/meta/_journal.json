@@ -29,13 +29,6 @@
       "when": 1787145600000,
       "tag": "0003_wide_mindworm",
       "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1787172384702,
-      "tag": "0003_wide_mindworm",
-      "breakpoints": true
     }
   ]
 }

@@ -1,1 +1,1 @@
-ALTER TABLE "user_progress" ADD COLUMN "completed_parts" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint
+ALTER TABLE "user_progress" ADD COLUMN IF NOT EXISTS "completed_parts" jsonb DEFAULT '[]'::jsonb NOT NULL;--> statement-breakpoint
