@@ -1,0 +1,1 @@
+ALTER TABLE "user_progress" ADD COLUMN "downloaded_parts" jsonb DEFAULT '[]'::jsonb NOT NULL;

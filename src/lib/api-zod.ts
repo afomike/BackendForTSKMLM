@@ -65,6 +65,9 @@ export const LessonPartSchema = z.object({
   fileUrl: z.string().min(1),
   description: z.string().optional(),
   duration: z.number().nullable().optional(),
+  // Undefined uses the safe default: YouTube content is streaming-only and
+  // uploaded/hosted files can be downloaded.
+  downloadable: z.boolean().optional(),
 });
 
 export const CreateLessonBody = z.object({

@@ -29,7 +29,21 @@ type LessonPart = {
   fileUrl: string;
   description?: string;
   duration?: number | null;
+  downloadable?: boolean;
 };
+
+function isYouTubeUrl(fileUrl: string): boolean {
+  try {
+    const host = new URL(fileUrl).hostname.toLowerCase().replace(/^www\./, "");
+    return host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be";
+  } catch {
+    return false;
+  }
+}
+
+function isPartDownloadable(part: Pick<LessonPart, "fileUrl" | "downloadable">): boolean {
+  return part.downloadable ?? !isYouTubeUrl(part.fileUrl);
+}
 
 function cleanLessonParts(parts: Partial<LessonPart>[] | undefined): LessonPart[] {
   return (parts ?? [])
@@ -40,6 +54,7 @@ function cleanLessonParts(parts: Partial<LessonPart>[] | undefined): LessonPart[
       fileUrl: part.fileUrl.trim(),
       description: part.description?.trim() || undefined,
       duration: part.duration ?? null,
+      downloadable: part.downloadable,
     }))
     .filter((part) => part.title.length > 0 && part.fileUrl.length > 0);
 }
@@ -58,6 +73,7 @@ function serializeLessonParts(
           fileUrl: part.fileUrl?.trim() || fallback?.fileUrl || "",
           description: part.description?.trim() || undefined,
           duration: part.duration ?? fallback?.duration ?? null,
+          downloadable: part.downloadable,
         }))
         .filter((part) => part.title.length > 0 && part.fileUrl.length > 0)
     : [];
@@ -90,6 +106,7 @@ router.get("/courses/:courseId/lessons", optionalAuth, async (req, res): Promise
     .orderBy(asc(lessonsTable.lessonOrder));
 
   let completedLessonIds = new Set<string>();
+  let downloadedPartIdsByLesson = new Map<string, string[]>();
   let completedAtMap = new Map<string, string | null>();
   let isEnrolled = false;
 
@@ -119,6 +136,11 @@ router.get("/courses/:courseId/lessons", optionalAuth, async (req, res): Promise
         completedLessonIds.add(p.lessonId);
         completedAtMap.set(p.lessonId, p.completedAt?.toISOString() ?? null);
       }
+      const downloadRows = await db
+        .select({ lessonId: userProgressTable.lessonId, downloadedParts: userProgressTable.downloadedParts })
+        .from(userProgressTable)
+        .where(eq(userProgressTable.userId, req.userId));
+      for (const row of downloadRows) downloadedPartIdsByLesson.set(row.lessonId, row.downloadedParts ?? []);
     }
   }
 
@@ -139,7 +161,7 @@ router.get("/courses/:courseId/lessons", optionalAuth, async (req, res): Promise
         contentType: asContentType(lesson.contentType),
         fileUrl: lesson.fileUrl,
         duration: lesson.duration,
-      }),
+      }).map((part) => ({ ...part, isDownloadable: isPartDownloadable(part), isDownloaded: (downloadedPartIdsByLesson.get(lesson.id) ?? []).includes(part.partId) })),
       duration: lesson.duration ?? null,
       createdAt: lesson.createdAt.toISOString(),
       isCompleted,
@@ -271,12 +293,14 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
   }
 
   let completedPartIds: string[] = [];
+  let downloadedPartIds: string[] = [];
   if (req.userId) {
     const [progress] = await db
-      .select({ completedParts: userProgressTable.completedParts })
+    .select({ completedParts: userProgressTable.completedParts, downloadedParts: userProgressTable.downloadedParts })
       .from(userProgressTable)
       .where(and(eq(userProgressTable.userId, req.userId), eq(userProgressTable.lessonId, lesson.id)));
     completedPartIds = progress?.completedParts ?? [];
+    downloadedPartIds = progress?.downloadedParts ?? [];
   }
 
   res.json({
@@ -291,9 +315,10 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
       contentType: asContentType(lesson.contentType),
       fileUrl: lesson.fileUrl,
       duration: lesson.duration,
-    }),
+    }).map((part) => ({ ...part, isDownloadable: isPartDownloadable(part), isDownloaded: downloadedPartIds.includes(part.partId) })),
     duration: lesson.duration ?? null,
     completedPartIds,
+    downloadedPartIds,
     createdAt: lesson.createdAt.toISOString(),
   });
 });

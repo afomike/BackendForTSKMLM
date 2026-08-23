@@ -14,6 +14,7 @@ export const userProgressTable = pgTable(
       .references(() => lessonsTable.id, { onDelete: "cascade" }),
     completed: boolean("completed").notNull().default(false),
     completedParts: jsonb("completed_parts").$type<string[]>().notNull().default([]),
+    downloadedParts: jsonb("downloaded_parts").$type<string[]>().notNull().default([]),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

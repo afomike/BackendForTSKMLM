@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Readable } from "node:stream";
 import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable, quizzesTable, quizAttemptsTable, assignmentSubmissionsTable } from "../lib/db.js";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "../lib/auth.js";
@@ -8,6 +9,148 @@ import {
 } from "../lib/api-zod.js";
 
 const router = Router();
+
+type DownloadPart = {
+  partId?: string;
+  title?: string;
+  fileUrl?: string;
+  downloadable?: boolean;
+};
+
+function isYouTubeUrl(fileUrl: string): boolean {
+  try {
+    const host = new URL(fileUrl).hostname.toLowerCase().replace(/^www\./, "");
+    return host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be";
+  } catch {
+    return false;
+  }
+}
+
+function canDownload(part: DownloadPart): boolean {
+  // YouTube URLs are deliberately streaming-only, even if old data says
+  // otherwise. This avoids attempting to download content the platform hosts.
+  return Boolean(part.fileUrl) && !isYouTubeUrl(part.fileUrl!) && part.downloadable !== false;
+}
+
+function lessonParts(lesson: typeof lessonsTable.$inferSelect): Required<Pick<DownloadPart, "partId" | "title" | "fileUrl">>[] & DownloadPart[] {
+  const saved = Array.isArray(lesson.parts) ? lesson.parts as DownloadPart[] : [];
+  const parts = saved.length > 0 ? saved : [{ title: lesson.title, fileUrl: lesson.fileUrl, downloadable: undefined }];
+  return parts
+    .filter((part) => typeof part.fileUrl === "string" && part.fileUrl.trim().length > 0)
+    .map((part, index) => ({
+      ...part,
+      partId: part.partId ?? `legacy-${lesson.id}-${index}`,
+      title: part.title?.trim() || `Part ${index + 1}`,
+      fileUrl: part.fileUrl!.trim(),
+    }));
+}
+
+async function requireEnrollment(userId: string, lesson: typeof lessonsTable.$inferSelect): Promise<boolean> {
+  const [enrollment] = await db.select({ id: enrollmentsTable.id }).from(enrollmentsTable).where(
+    and(eq(enrollmentsTable.userId, userId), eq(enrollmentsTable.courseId, lesson.courseId)),
+  );
+  return Boolean(enrollment);
+}
+
+function safeDownloadFilename(title: string, contentType: string | null): string {
+  const name = title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "lesson-download";
+  const extension = contentType?.includes("pdf") ? ".pdf" : contentType?.startsWith("audio/") ? ".mp3" : contentType?.startsWith("video/") ? ".mp4" : "";
+  return `${name.slice(0, 120)}${extension}`;
+}
+
+// Lists every downloadable part in a course. The client can use each URL to
+// download items one-by-one; YouTube parts are returned with an explanation.
+router.get("/courses/:courseId/downloads", requireAuth, async (req, res): Promise<void> => {
+  const courseId = Array.isArray(req.params.courseId) ? req.params.courseId[0] : req.params.courseId;
+  if (!courseId) {
+    res.status(400).json({ error: "Course id is required" });
+    return;
+  }
+  const lessons = await db.select().from(lessonsTable).where(eq(lessonsTable.courseId, courseId));
+  if (lessons.length === 0) {
+    res.status(404).json({ error: "Course has no lessons" });
+    return;
+  }
+  if (!(await requireEnrollment(req.userId!, lessons[0]!))) {
+    res.status(403).json({ error: "Not enrolled in this course" });
+    return;
+  }
+  const progress = await db.select({ lessonId: userProgressTable.lessonId, downloadedParts: userProgressTable.downloadedParts })
+    .from(userProgressTable).where(eq(userProgressTable.userId, req.userId!));
+  const downloadedByLesson = new Map(progress.map((row) => [row.lessonId, row.downloadedParts ?? []]));
+  const items = lessons.flatMap((lesson) => lessonParts(lesson).map((part) => ({
+    lessonId: lesson.id,
+    lessonTitle: lesson.title,
+    partId: part.partId,
+    partTitle: part.title,
+    isDownloadable: canDownload(part),
+    isDownloaded: (downloadedByLesson.get(lesson.id) ?? []).includes(part.partId),
+    unavailableReason: canDownload(part) ? null : "This part is hosted on YouTube and is available for streaming only.",
+    downloadUrl: canDownload(part) ? `/api/lessons/${lesson.id}/parts/${part.partId}/download` : null,
+  })));
+  res.json({ courseId, downloadableCount: items.filter((item) => item.isDownloadable).length, items });
+});
+
+// Streams one hosted file as an attachment. A part is marked downloaded/read
+// only after the remote host accepts the download request. It never completes
+// the lesson, so a required quiz remains compulsory.
+router.get("/lessons/:id/parts/:partId/download", requireAuth, async (req, res): Promise<void> => {
+  const lessonId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const partId = Array.isArray(req.params.partId) ? req.params.partId[0] : req.params.partId;
+  if (!lessonId || !partId) {
+    res.status(400).json({ error: "Lesson id and part id are required" });
+    return;
+  }
+  const [lesson] = await db.select().from(lessonsTable).where(eq(lessonsTable.id, lessonId));
+  if (!lesson) {
+    res.status(404).json({ error: "Lesson not found" });
+    return;
+  }
+  if (!(await requireEnrollment(req.userId!, lesson))) {
+    res.status(403).json({ error: "Not enrolled in this course" });
+    return;
+  }
+  const part = lessonParts(lesson).find((item) => item.partId === partId);
+  if (!part) {
+    res.status(404).json({ error: "Lesson part not found" });
+    return;
+  }
+  if (!canDownload(part)) {
+    res.status(422).json({ error: "This part is hosted on YouTube and is available for streaming only.", code: "STREAMING_ONLY" });
+    return;
+  }
+  let source: URL;
+  try {
+    source = new URL(part.fileUrl!, `${req.protocol}://${req.get("host")}`);
+  } catch {
+    res.status(422).json({ error: "This lesson part does not have a valid download URL" });
+    return;
+  }
+  let upstream: Response;
+  try {
+    upstream = await fetch(source);
+  } catch {
+    res.status(502).json({ error: "The lesson file could not be reached right now" });
+    return;
+  }
+  if (!upstream.ok || !upstream.body) {
+    res.status(502).json({ error: "The lesson file could not be downloaded right now" });
+    return;
+  }
+  const [existing] = await db.select().from(userProgressTable).where(
+    and(eq(userProgressTable.userId, req.userId!), eq(userProgressTable.lessonId, lessonId)),
+  );
+  const downloadedParts = Array.from(new Set([...(existing?.downloadedParts ?? []), partId]));
+  const completedParts = Array.from(new Set([...(existing?.completedParts ?? []), partId]));
+  await db.insert(userProgressTable).values({ userId: req.userId!, lessonId, downloadedParts, completedParts })
+    .onConflictDoUpdate({ target: [userProgressTable.userId, userProgressTable.lessonId], set: { downloadedParts, completedParts } });
+  const contentType = upstream.headers.get("content-type");
+  if (contentType) res.setHeader("Content-Type", contentType);
+  const contentLength = upstream.headers.get("content-length");
+  if (contentLength) res.setHeader("Content-Length", contentLength);
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(safeDownloadFilename(part.title!, contentType))}`);
+  Readable.fromWeb(upstream.body as ReadableStream<Uint8Array>).pipe(res);
+});
 
 async function hasPassedLessonQuiz(userId: string, lessonId: string): Promise<boolean> {
   const [quiz] = await db
