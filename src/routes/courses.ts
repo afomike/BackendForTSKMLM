@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { db, coursesTable, lessonsTable, enrollmentsTable, userProgressTable } from "../lib/db.js";
-import { eq, count, and, ilike } from "drizzle-orm";
+import { db, coursesTable, lessonsTable, enrollmentsTable, userProgressTable, assignmentSubmissionsTable, quizzesTable, quizQuestionsTable, quizOptionsTable, quizAttemptsTable } from "../lib/db.js";
+import { eq, count, and, ilike, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin, optionalAuth } from "../lib/auth.js";
 import {
   CreateCourseBody,
@@ -326,10 +326,37 @@ router.delete("/courses/:id", requireAdmin, async (req, res): Promise<void> => {
     return;
   }
 
-  const [course] = await db
-    .delete(coursesTable)
-    .where(eq(coursesTable.id, params.data.id))
-    .returning();
+  // Delete dependencies explicitly as well as relying on database cascades.
+  // This also cleans courses created before the cascade migration was applied.
+  const [course] = await db.transaction(async (tx) => {
+    const [existingCourse] = await tx.select({ id: coursesTable.id }).from(coursesTable)
+      .where(eq(coursesTable.id, params.data.id));
+    if (!existingCourse) return [];
+
+    const lessons = await tx.select({ id: lessonsTable.id }).from(lessonsTable)
+      .where(eq(lessonsTable.courseId, existingCourse.id));
+    const lessonIds = lessons.map((lesson) => lesson.id);
+
+    if (lessonIds.length > 0) {
+      const quizzes = await tx.select({ id: quizzesTable.id }).from(quizzesTable)
+        .where(inArray(quizzesTable.lessonId, lessonIds));
+      const quizIds = quizzes.map((quiz) => quiz.id);
+      if (quizIds.length > 0) {
+        const questions = await tx.select({ id: quizQuestionsTable.id }).from(quizQuestionsTable)
+          .where(inArray(quizQuestionsTable.quizId, quizIds));
+        const questionIds = questions.map((question) => question.id);
+        if (questionIds.length > 0) await tx.delete(quizOptionsTable).where(inArray(quizOptionsTable.questionId, questionIds));
+        await tx.delete(quizAttemptsTable).where(inArray(quizAttemptsTable.quizId, quizIds));
+        await tx.delete(quizQuestionsTable).where(inArray(quizQuestionsTable.quizId, quizIds));
+        await tx.delete(quizzesTable).where(inArray(quizzesTable.id, quizIds));
+      }
+      await tx.delete(userProgressTable).where(inArray(userProgressTable.lessonId, lessonIds));
+      await tx.delete(lessonsTable).where(inArray(lessonsTable.id, lessonIds));
+    }
+    await tx.delete(assignmentSubmissionsTable).where(eq(assignmentSubmissionsTable.courseId, existingCourse.id));
+    await tx.delete(enrollmentsTable).where(eq(enrollmentsTable.courseId, existingCourse.id));
+    return tx.delete(coursesTable).where(eq(coursesTable.id, existingCourse.id)).returning();
+  });
 
   if (!course) {
     res.status(404).json({ error: "Course not found" });

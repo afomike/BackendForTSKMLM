@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
-import { db, lessonsTable, enrollmentsTable, userProgressTable } from "../lib/db.js";
-import { eq, and, asc, gte, sql } from "drizzle-orm";
+import { db, lessonsTable, enrollmentsTable, userProgressTable, quizzesTable, quizQuestionsTable, quizOptionsTable, quizAttemptsTable } from "../lib/db.js";
+import { eq, and, asc, gte, sql, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin, optionalAuth } from "../lib/auth.js";
 import {
   ListLessonsParams,
@@ -369,6 +369,25 @@ router.patch("/lessons/:id", requireAdmin, async (req, res): Promise<void> => {
     return;
   }
 
+  // Parts live inside the lesson JSON, so removing one must also remove its
+  // progress/download references from every student record.
+  if (parsed.data.parts !== undefined) {
+    const validPartIds = new Set(serializeLessonParts(lesson.parts, lesson.id, {
+      title: lesson.title,
+      contentType: asContentType(lesson.contentType),
+      fileUrl: lesson.fileUrl,
+      duration: lesson.duration,
+    }).map((part) => part.partId));
+    const progressRows = await db.select().from(userProgressTable)
+      .where(eq(userProgressTable.lessonId, lesson.id));
+    await Promise.all(progressRows.map((progress) => {
+      const completedParts = progress.completedParts.filter((partId) => validPartIds.has(partId));
+      const downloadedParts = progress.downloadedParts.filter((partId) => validPartIds.has(partId));
+      return db.update(userProgressTable).set({ completedParts, downloadedParts })
+        .where(eq(userProgressTable.id, progress.id));
+    }));
+  }
+
   res.json({
     id: lesson.id,
     courseId: lesson.courseId,
@@ -394,10 +413,24 @@ router.delete("/lessons/:id", requireAdmin, async (req, res): Promise<void> => {
     return;
   }
 
-  const [lesson] = await db
-    .delete(lessonsTable)
-    .where(eq(lessonsTable.id, params.data.id))
-    .returning();
+  const [lesson] = await db.transaction(async (tx) => {
+    const [existingLesson] = await tx.select().from(lessonsTable).where(eq(lessonsTable.id, params.data.id));
+    if (!existingLesson) return [];
+    const quizzes = await tx.select({ id: quizzesTable.id }).from(quizzesTable)
+      .where(eq(quizzesTable.lessonId, existingLesson.id));
+    const quizIds = quizzes.map((quiz) => quiz.id);
+    if (quizIds.length > 0) {
+      const questions = await tx.select({ id: quizQuestionsTable.id }).from(quizQuestionsTable)
+        .where(inArray(quizQuestionsTable.quizId, quizIds));
+      const questionIds = questions.map((question) => question.id);
+      if (questionIds.length > 0) await tx.delete(quizOptionsTable).where(inArray(quizOptionsTable.questionId, questionIds));
+      await tx.delete(quizAttemptsTable).where(inArray(quizAttemptsTable.quizId, quizIds));
+      await tx.delete(quizQuestionsTable).where(inArray(quizQuestionsTable.quizId, quizIds));
+      await tx.delete(quizzesTable).where(inArray(quizzesTable.id, quizIds));
+    }
+    await tx.delete(userProgressTable).where(eq(userProgressTable.lessonId, existingLesson.id));
+    return tx.delete(lessonsTable).where(eq(lessonsTable.id, existingLesson.id)).returning();
+  });
 
   if (!lesson) {
     res.status(404).json({ error: "Lesson not found" });
