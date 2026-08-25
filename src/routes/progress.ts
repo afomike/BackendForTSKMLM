@@ -120,14 +120,33 @@ async function streamZip(
   res: import("express").Response,
   files: Array<{ lessonId: string; path: string; part: DownloadPart }>,
 ): Promise<Map<string, string[]>> {
-  const entries: ZipEntry[] = []; const downloaded = new Map<string, string[]>(); let offset = 0;
-  res.status(200).setHeader("Content-Type", "application/zip");
+  const sources: Array<{
+    file: (typeof files)[number];
+    response: Response;
+  }> = [];
+
   for (const file of files) {
     const source = file.part.fileUrl ? await resolveSource(file.part.fileUrl, req) : null;
-    if (!source) continue;
+    if (!source) throw new Error(`Invalid download URL for ${file.part.title ?? "lesson part"}`);
     let upstream: Response;
-    try { upstream = await fetch(source); } catch { continue; }
-    if (!upstream.ok || !upstream.body || upstream.headers.get("content-type")?.toLowerCase().includes("text/html")) continue;
+    try {
+      upstream = await fetch(source);
+    } catch {
+      throw new Error(`Could not reach the file for ${file.part.title ?? "lesson part"}`);
+    }
+    if (!upstream.ok || !upstream.body || upstream.headers.get("content-type")?.toLowerCase().includes("text/html")) {
+      throw new Error(`Could not download the file for ${file.part.title ?? "lesson part"}`);
+    }
+    sources.push({ file, response: upstream });
+  }
+
+  if (sources.length === 0) {
+    throw new Error("No downloadable files were found");
+  }
+
+  const entries: ZipEntry[] = []; const downloaded = new Map<string, string[]>(); let offset = 0;
+  res.status(200).setHeader("Content-Type", "application/zip");
+  for (const { file, response: upstream } of sources) {
     const name = Buffer.from(file.path, "utf8"); const entry: ZipEntry = { name, offset, crc: 0, size: 0 };
     const local = zipLocalHeader(name); await writeResponse(res, local); offset += local.length;
     const reader = upstream.body.getReader();
