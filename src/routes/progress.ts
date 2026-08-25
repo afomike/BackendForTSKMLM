@@ -112,7 +112,14 @@ async function markDownloaded(userId: string, lessonId: string, partIds: string[
 }
 
 async function resolveSource(rawUrl: string, req: import("express").Request): Promise<URL | null> {
-  try { return new URL(rawUrl, `${req.protocol}://${req.get("host")}`); } catch { return null; }
+  try {
+    const storagePath = rawUrl.startsWith("/objects/")
+      ? `${req.baseUrl}/storage${rawUrl}`
+      : rawUrl;
+    return new URL(storagePath, `${req.protocol}://${req.get("host")}`);
+  } catch {
+    return null;
+  }
 }
 
 async function streamZip(
