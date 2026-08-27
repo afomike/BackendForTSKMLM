@@ -33,7 +33,7 @@ function canDownload(part: DownloadPart): boolean {
   return Boolean(part.fileUrl) && !isYouTubeUrl(part.fileUrl!) && part.downloadable !== false;
 }
 
-function lessonParts(lesson: typeof lessonsTable.$inferSelect): Required<Pick<DownloadPart, "partId" | "title" | "fileUrl">>[] & DownloadPart[] {
+function lessonParts(lesson: typeof lessonsTable.$inferSelect): Array<DownloadPart & { partId: string; title: string; fileUrl: string }> {
   const saved = Array.isArray(lesson.parts) ? lesson.parts as DownloadPart[] : [];
   const parts = saved.length > 0 ? saved : [{ title: lesson.title, fileUrl: lesson.fileUrl, downloadable: undefined }];
   return parts
@@ -59,9 +59,10 @@ function safeDownloadFilename(title: string, contentType: string | null): string
   return `${name.slice(0, 120)}${extension && !name.toLowerCase().endsWith(extension) ? extension : ""}`;
 }
 
-function sourceFilename(title: string, source: URL, contentType: string | null): string {
+function sourceFilename(title: string, source: URL, contentType: string | null, declaredType?: string): string {
   const urlName = decodeURIComponent(source.pathname.split("/").pop() ?? "");
-  const extension = urlName.match(/\.[a-z0-9]{1,8}$/i)?.[0] ?? safeDownloadFilename("file", contentType).replace("file", "");
+  const declaredContentType = declaredType === "pdf" ? "application/pdf" : declaredType === "audio" ? "audio/mpeg" : declaredType === "video" ? "video/mp4" : contentType;
+  const extension = urlName.match(/\.[a-z0-9]{1,8}$/i)?.[0] ?? safeDownloadFilename("file", declaredContentType).replace("file", "");
   const base = title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "download";
   return `${base.slice(0, 120)}${extension && !base.toLowerCase().endsWith(extension.toLowerCase()) ? extension : ""}`;
 }
@@ -226,7 +227,7 @@ router.get("/courses/:courseId/download", requireAuth, async (req, res): Promise
   const files = lessons.flatMap((lesson, lessonIndex) => lessonParts(lesson).filter(canDownload).map((part, partIndex) => {
     const source = new URL(part.fileUrl, `${req.protocol}://${req.get("host")}`);
     const contentType = part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : null;
-    return { lessonId: lesson.id, part, path: `${String(lessonIndex + 1).padStart(2, "0")} - ${archiveName(lesson.title)}/${String(partIndex + 1).padStart(2, "0")} - ${sourceFilename(part.title, source, contentType)}` };
+    return { lessonId: lesson.id, part, path: `${String(lessonIndex + 1).padStart(2, "0")} - ${archiveName(lesson.title)}/${String(partIndex + 1).padStart(2, "0")} - ${sourceFilename(part.title, source, contentType, part.contentType)}` };
   }));
   if (files.length === 0) { res.status(422).json({ error: "This course has no downloadable files" }); return; }
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${archiveName(course.title)}.zip`)}`);
@@ -243,7 +244,7 @@ router.get("/lessons/:id/download", requireAuth, async (req, res): Promise<void>
   const files = lessonParts(lesson).filter(canDownload).map((part, partIndex) => {
     const source = new URL(part.fileUrl, `${req.protocol}://${req.get("host")}`);
     const contentType = part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : null;
-    return { lessonId: lesson.id, part, path: `${String(partIndex + 1).padStart(2, "0")} - ${sourceFilename(part.title, source, contentType)}` };
+    return { lessonId: lesson.id, part, path: `${String(partIndex + 1).padStart(2, "0")} - ${sourceFilename(part.title, source, contentType, part.contentType)}` };
   });
   if (files.length === 0) { res.status(422).json({ error: "This lesson has no downloadable files" }); return; }
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${archiveName(lesson.title)}.zip`)}`);
@@ -296,11 +297,14 @@ router.get("/lessons/:id/parts/:partId/download", requireAuth, async (req, res):
     return;
   }
   await markDownloaded(req.userId!, lessonId, [partId]);
-  const contentType = upstream.headers.get("content-type");
+  const upstreamContentType = upstream.headers.get("content-type");
+  const contentType = upstreamContentType?.toLowerCase().includes("application/octet-stream")
+    ? part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : upstreamContentType
+    : upstreamContentType;
   if (contentType) res.setHeader("Content-Type", contentType);
   const contentLength = upstream.headers.get("content-length");
   if (contentLength) res.setHeader("Content-Length", contentLength);
-  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(sourceFilename(part.title!, source, contentType))}`);
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(sourceFilename(part.title!, source, contentType, part.contentType))}`);
   Readable.fromWeb(upstream.body as ReadableStream<Uint8Array>).pipe(res);
 });
 
