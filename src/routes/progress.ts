@@ -116,7 +116,16 @@ async function resolveSource(rawUrl: string, req: import("express").Request): Pr
     const storagePath = rawUrl.startsWith("/objects/")
       ? `${req.baseUrl}/storage${rawUrl}`
       : rawUrl;
-    return new URL(storagePath, `${req.protocol}://${req.get("host")}`);
+    const source = new URL(storagePath, `${req.protocol}://${req.get("host")}`);
+
+    if (source.hostname === "drive.google.com") {
+      const fileId = source.pathname.match(/^\/file\/d\/([^/]+)/)?.[1] ?? source.searchParams.get("id");
+      if (fileId) {
+        return new URL(`https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download`);
+      }
+    }
+
+    return source;
   } catch {
     return null;
   }

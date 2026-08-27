@@ -39,7 +39,7 @@ function buildObjectUrl(objectPath: string): string {
   const objectId = normalizedPath.startsWith("objects/")
     ? normalizedPath.slice("objects/".length)
     : normalizedPath;
-  return buildCloudinaryUrl(`image/upload/${objectId}`);
+  return buildCloudinaryUrl(`auto/upload/${objectId}`);
 }
 
 export class ObjectNotFoundError extends Error {
