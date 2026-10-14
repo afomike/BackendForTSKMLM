@@ -65,3 +65,12 @@ Deploy backend and frontend together. Configure additional trusted download prov
 - Course, lesson, dashboard and certificate queries refresh when opened/focused and every 30 seconds while active. Admin edits invalidate related cached queries. Invalid certificates are no longer supported by the completion API once required work remains.
 - Completion and quiz writes check the lesson revision under a row lock. A page opened before an edit receives a refresh-required response rather than restoring an outdated completed state. Downloads of an older revision do not mark the revised content as read.
 - On a subsequent lesson save, tracked unfinished parts can repair an older incorrectly completed flag. There is no blanket reset/backfill of historical student data and no schema change.
+
+## Profile photos and admin profile access
+
+- Password reveal buttons now have explicit contrasting backgrounds and icon colors for light/dark forms.
+- `/profile` allows both students and admins. Other student-only routes retain their previous access restrictions.
+- Profile settings accept local JPG, PNG and WebP files up to 5 MB, show a preview, and upload on Save Changes. A remove-picture button and optional picture link remain available.
+- Authenticated `POST /api/auth/avatar` accepts image bytes, verifies the format signature and size, applies per-client upload throttling, uploads an image limited to 512 × 512 pixels, and saves only the signed-in user's avatar URL.
+- The upload uses [Cloudinary's documented signed upload flow](https://cloudinary.com/documentation/authentication_signatures). `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` and `CLOUDINARY_API_SECRET` must be configured on the backend. The API secret is never sent to the browser. Existing unsigned lesson upload permissions are unchanged.
+- Validation: backend unit/HTTP tests simulate Cloudinary, including student/admin uploads, unauthorized requests, invalid image bytes and oversized files. Live Cloudinary uploads and browser visual checks were not performed.

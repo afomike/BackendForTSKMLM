@@ -54,7 +54,7 @@ test("account administration HTTP behavior", async t => {
   app.use(express.json());
   app.use(usersRouter, authRouter, quizRouter, progressRouter, lessonRouter, courseRouter);
   app.get("/optional", optionalAuth, (req, res) => res.json({ userId: req.userId ?? null }));
-  app.use((err: unknown, _req: any, res: any, _next: any) => res.status(500).json({ error: "Internal server error" }));
+  app.use((err: unknown, _req: any, res: any, _next: any) => res.status(typeof err === "object" && err && "status" in err ? Number(err.status) : 500).json({ error: "Request failed" }));
   const server = app.listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   const address = server.address() as { port: number };
@@ -341,6 +341,48 @@ test("account administration HTTP behavior", async t => {
       assert.equal((await response.json()).progressReset, false);
       assert.deepEqual(mutations, ["lock"]);
       assert.deepEqual(deletedTables, []);
+    });
+    await t.test("students and admins can upload their own avatar; invalid uploads do not save", async () => {
+      const originalFetch = globalThis.fetch;
+      const keys = ["CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"];
+      const originalEnvironment = keys.map(key => process.env[key]);
+      const avatarUrl = "https://res.cloudinary.com/avatar-test/image/upload/avatar.png";
+      let uploads = 0;
+      try {
+        process.env.CLOUDINARY_CLOUD_NAME = "avatar-test";
+        process.env.CLOUDINARY_API_KEY = "test-key";
+        process.env.CLOUDINARY_API_SECRET = "test-secret";
+        globalThis.fetch = async (input, options) => {
+          if (String(input).startsWith("https://api.cloudinary.com/")) {
+            uploads++;
+            return Response.json({ secure_url: avatarUrl, resource_type: "image" });
+          }
+          return originalFetch(input, options);
+        };
+        const send = (body: Buffer, auth: string | null = token) => fetch(`http://127.0.0.1:${address.port}/auth/avatar`, {
+          method: "POST", headers: { "Content-Type": "image/png", ...(auth ? { Authorization: `Bearer ${auth}` } : {}) }, body: new Uint8Array(body),
+        });
+        const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+        reset([]);
+        assert.equal((await send(png, null)).status, 401);
+        for (const account of [student, admin]) {
+          reset([[account]], [{ ...account, avatarUrl }]);
+          const response = await send(png);
+          assert.equal(response.status, 200);
+          assert.equal((await response.json()).avatarUrl, avatarUrl);
+          assert.equal(updateValues[0].values.avatarUrl, avatarUrl);
+        }
+        reset([[student]]);
+        assert.equal((await send(Buffer.from("fake image"))).status, 400);
+        assert.deepEqual(mutations, []);
+        reset([[student]]);
+        assert.equal((await send(Buffer.alloc(5 * 1024 * 1024 + 1))).status, 413);
+        assert.deepEqual(mutations, []);
+        assert.equal(uploads, 2);
+      } finally {
+        globalThis.fetch = originalFetch;
+        keys.forEach((key, index) => { if (originalEnvironment[index] === undefined) delete process.env[key]; else process.env[key] = originalEnvironment[index]; });
+      }
     });
   } finally {
     Object.assign(db, original);

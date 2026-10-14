@@ -1,9 +1,10 @@
-import { Router } from "express";
+import { Router, raw } from "express";
 import bcrypt from "bcryptjs";
 import { db, usersTable } from "../lib/db.js";
 import { eq, sql, and } from "drizzle-orm";
 import { signToken, requireAuth, credentialKey } from "../lib/auth.js";
 import { rateLimit } from "../lib/rate-limit.js";
+import { uploadAvatar } from "../lib/avatar-upload.js";
 import {
   RegisterBody,
   LoginBody,
@@ -12,6 +13,16 @@ import {
 } from "../lib/api-zod.js";
 
 const router = Router();
+
+router.post("/auth/avatar", requireAuth, rateLimit(10), raw({ type: ["image/jpeg", "image/png", "image/webp"], limit: "5mb" }), async (req, res): Promise<void> => {
+  if (!Buffer.isBuffer(req.body) || !req.body.length) {
+    res.status(400).json({ error: "Choose a JPG, PNG or WebP image up to 5 MB." }); return;
+  }
+  const avatarUrl = await uploadAvatar(req.body, req.userId!);
+  const [user] = await db.update(usersTable).set({ avatarUrl }).where(eq(usersTable.id, req.userId!)).returning();
+  if (!user) { res.status(401).json({ error: "Account unavailable" }); return; }
+  res.json({ avatarUrl });
+});
 
 router.post("/auth/register", rateLimit(10), async (req, res): Promise<void> => {
   const parsed = RegisterBody.safeParse(req.body);
