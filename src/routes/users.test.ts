@@ -299,7 +299,7 @@ test("account administration HTTP behavior", async t => {
       const completedLesson = { id: targetId };
       const addedLesson = { id: "33333333-3333-4333-8333-333333333333" };
       const progress = { lessonId: targetId, completed: true, completedAt: new Date() };
-      reset([[student], [{ courseId: adminId }], [course], [completedLesson, addedLesson], [progress], [progress]]);
+      reset([[student], [{ courseId: adminId }], [progress], [course], [completedLesson, addedLesson]]);
       const response = await request("/student/progress");
       assert.equal(response.status, 200);
       const body = await response.json();
@@ -383,6 +383,53 @@ test("account administration HTTP behavior", async t => {
         globalThis.fetch = originalFetch;
         keys.forEach((key, index) => { if (originalEnvironment[index] === undefined) delete process.env[key]; else process.env[key] = originalEnvironment[index]; });
       }
+    });
+    await t.test("partial playback persists 30 minutes without completing the lesson and is returned on the next visit", async () => {
+      const revision = new Date();
+      const lesson = { id: targetId, courseId: adminId, title: "Two-hour lesson", contentType: "video", fileUrl: "https://res.cloudinary.com/video.mp4",
+        parts: [{ partId: "video", title: "Recording", contentType: "video", fileUrl: "https://res.cloudinary.com/video.mp4" }], updatedAt: revision, createdAt: revision };
+      const enrollment = { id: "enrolled" };
+      reset([[student], [lesson], [enrollment], [{ id: targetId }], [enrollment], [], [lesson], []]);
+      const response = await request(`/lessons/${targetId}/parts/video/playback`, "PATCH", {
+        positionSeconds: 1800, durationSeconds: 7200, capturedAt: revision.toISOString(), lessonUpdatedAt: revision.toISOString(),
+      });
+      assert.equal(response.status, 200);
+      assert.equal(inserted?.completed, undefined);
+      assert.equal(inserted?.completedParts, undefined);
+      const positions = inserted?.playbackPositions as any;
+      assert.equal(positions.video.positionSeconds, 1800);
+      assert.equal(positions.video.durationSeconds, 7200);
+      assert.equal(selections.length, 0);
+      reset([[student], [lesson], [{ id: targetId }], [enrollment], [], [{ playbackPositions: positions, completedParts: [], downloadedParts: [] }]]);
+      const revisit = await request(`/lessons/${targetId}`);
+      assert.equal(revisit.status, 200);
+      assert.equal((await revisit.json()).playbackPositions.video.positionSeconds, 1800);
+    });
+    await t.test("invalid, unenrolled and stale playback requests cannot write progress", async () => {
+      const lesson = { id: targetId, courseId: adminId, contentType: "video", fileUrl: "https://res.cloudinary.com/video.mp4",
+        parts: [{ partId: "video", contentType: "video", fileUrl: "https://res.cloudinary.com/video.mp4" }], updatedAt: new Date() };
+      const body = { positionSeconds: 1800, durationSeconds: 7200, capturedAt: new Date().toISOString(), lessonUpdatedAt: lesson.updatedAt.toISOString() };
+      reset([[student]]);
+      assert.equal((await request(`/lessons/${targetId}/parts/video/playback`, "PATCH", { ...body, positionSeconds: 8000 })).status, 400);
+      assert.deepEqual(mutations, []);
+      reset([[student], [lesson], []]);
+      assert.equal((await request(`/lessons/${targetId}/parts/video/playback`, "PATCH", body)).status, 403);
+      assert.deepEqual(mutations, []);
+      reset([[student], [lesson], [{ id: "enrolled" }], [{ id: targetId }], [{ id: "enrolled" }], [], [lesson]]);
+      assert.equal((await request(`/lessons/${targetId}/parts/video/playback`, "PATCH", { ...body, lessonUpdatedAt: new Date(lesson.updatedAt.getTime() - 1000).toISOString() })).status, 409);
+      assert.deepEqual(mutations, []);
+    });
+    await t.test("a partially watched lesson updates last activity without counting as completed", async () => {
+      const lastViewedAt = new Date();
+      reset([[student], [{ courseId: adminId }], [{ lessonId: targetId, completed: false, lastViewedAt }],
+        [{ id: adminId, title: "Course", thumbnailUrl: null }], [{ id: targetId }]]);
+      const response = await request("/student/progress");
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.completedLessons, 0);
+      assert.equal(body.totalCompleted, 0);
+      assert.equal(body.enrolledCourses[0].lastActivityAt, lastViewedAt.toISOString());
+      assert.equal(body.enrolledCourses[0].isCompleted, false);
     });
   } finally {
     Object.assign(db, original);

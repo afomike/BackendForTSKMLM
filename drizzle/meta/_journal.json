@@ -43,6 +43,13 @@
       "when": 1787446645923,
       "tag": "0005_cleanup_orphaned_learning_records",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791998887975,
+      "tag": "0006_flowery_slipstream",
+      "breakpoints": true
     }
   ]
 }

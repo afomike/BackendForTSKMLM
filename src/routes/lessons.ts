@@ -304,13 +304,16 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
 
   let completedPartIds: string[] = [];
   let downloadedPartIds: string[] = [];
+  let playbackPositions = {};
   if (req.userId) {
     const [progress] = await db
-    .select({ completedParts: userProgressTable.completedParts, downloadedParts: userProgressTable.downloadedParts })
+    .select({ completedParts: userProgressTable.completedParts, downloadedParts: userProgressTable.downloadedParts,
+      playbackPositions: userProgressTable.playbackPositions })
       .from(userProgressTable)
       .where(and(eq(userProgressTable.userId, req.userId), eq(userProgressTable.lessonId, lesson.id)));
     completedPartIds = progress?.completedParts ?? [];
     downloadedPartIds = progress?.downloadedParts ?? [];
+    playbackPositions = progress?.playbackPositions ?? {};
   }
 
   res.json({
@@ -329,6 +332,7 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
     duration: lesson.duration ?? null,
     completedPartIds,
     downloadedPartIds,
+    playbackPositions,
     updatedAt: lesson.updatedAt.toISOString(),
     createdAt: lesson.createdAt.toISOString(),
   });
@@ -391,6 +395,7 @@ router.patch("/lessons/:id", requireAdmin, async (req, res): Promise<void> => {
         await tx.update(userProgressTable).set({
           completedParts: completedParts.filter(id => revision.unchanged.has(id)),
           downloadedParts: (progress.downloadedParts ?? []).filter(id => revision.unchanged.has(id)),
+          playbackPositions: Object.fromEntries(Object.entries(progress.playbackPositions ?? {}).filter(([id]) => revision.unchanged.has(id))),
           ...(needsCompletion ? { completed: false, completedAt: null } : {}),
         }).where(eq(userProgressTable.id, progress.id));
       }

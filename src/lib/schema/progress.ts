@@ -1,6 +1,7 @@
 import { boolean, index, jsonb, pgTable, timestamp, uuid, unique } from "drizzle-orm/pg-core";
 import { lessonsTable } from "./lessons.js";
 import { usersTable } from "./users.js";
+import type { PlaybackPosition } from "../playback.js";
 
 export const userProgressTable = pgTable(
   "user_progress",
@@ -15,6 +16,8 @@ export const userProgressTable = pgTable(
     completed: boolean("completed").notNull().default(false),
     completedParts: jsonb("completed_parts").$type<string[]>().notNull().default([]),
     downloadedParts: jsonb("downloaded_parts").$type<string[]>().notNull().default([]),
+    playbackPositions: jsonb("playback_positions").$type<Record<string, PlaybackPosition>>().notNull().default({}),
+    lastViewedAt: timestamp("last_viewed_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

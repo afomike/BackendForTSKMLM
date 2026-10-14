@@ -5,6 +5,7 @@ import { fetchDownload, validateDownloadUrl } from "../lib/download-source.js";
 import { ObjectStorageService } from "../lib/objectStorage.js";
 import { lessonAccess } from "../lib/lesson-access.js";
 import { withLessonRevision } from "../lib/course-revision.js";
+import { SavePlaybackBody, mergePlayback } from "../lib/playback.js";
 import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable, quizzesTable, quizAttemptsTable, assignmentSubmissionsTable } from "../lib/db.js";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "../lib/auth.js";
@@ -14,6 +15,32 @@ import {
 } from "../lib/api-zod.js";
 
 const router = Router();
+
+router.patch("/lessons/:id/parts/:partId/playback", requireAuth, async (req, res): Promise<void> => {
+  const parsed = SavePlaybackBody.safeParse(req.body);
+  const lessonId = typeof req.params.id === "string" ? req.params.id : "";
+  const partId = typeof req.params.partId === "string" ? req.params.partId : "";
+  if (!parsed.success || !lessonId || !partId) { res.status(400).json({ error: "Provide a valid playback position, duration and lesson revision" }); return; }
+  if (Date.parse(parsed.data.capturedAt) > Date.now() + 5 * 60_000) { res.status(400).json({ error: "Your device clock is ahead. Correct it before saving progress." }); return; }
+  const [lesson] = await db.select().from(lessonsTable).where(eq(lessonsTable.id, lessonId));
+  if (!lesson) { res.status(404).json({ error: "Lesson not found" }); return; }
+  if (!(await requireEnrollment(req.userId!, lesson))) { res.status(403).json({ error: "Not enrolled in this course" }); return; }
+  if (!(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lesson.id)) { res.status(403).json({ error: "Complete the previous lesson first" }); return; }
+  const part = lessonParts(lesson).find(part => part.partId === partId);
+  if (!part || !["video", "audio"].includes(part.contentType ?? lesson.contentType)) { res.status(400).json({ error: "Playback can only be saved for a video or audio part in this lesson" }); return; }
+  const saved = await withLessonRevision(lesson, parsed.data.lessonUpdatedAt, async tx => {
+    const [existing] = await tx.select().from(userProgressTable)
+      .where(and(eq(userProgressTable.userId, req.userId!), eq(userProgressTable.lessonId, lessonId)));
+    const playbackPositions = mergePlayback(existing?.playbackPositions ?? {}, partId, {
+      positionSeconds: parsed.data.positionSeconds, durationSeconds: parsed.data.durationSeconds, capturedAt: parsed.data.capturedAt,
+    });
+    const lastViewedAt = new Date();
+    await tx.insert(userProgressTable).values({ userId: req.userId!, lessonId, playbackPositions, lastViewedAt })
+      .onConflictDoUpdate({ target: [userProgressTable.userId, userProgressTable.lessonId], set: { playbackPositions, lastViewedAt } });
+  });
+  if (!saved) { res.status(409).json({ error: "Lesson content changed. Refresh before saving progress." }); return; }
+  res.json({ message: "Playback saved" });
+});
 
 type DownloadPart = {
   partId?: string;
@@ -578,6 +605,8 @@ router.get("/student/progress", requireAuth, async (req, res): Promise<void> => 
 
   const courseIds = enrollments.map((e) => e.courseId);
 
+  const progressRows = await db.select().from(userProgressTable).where(eq(userProgressTable.userId, req.userId!));
+
   const enrolledCourses = [];
   for (const courseId of courseIds) {
     const [course] = await db
@@ -591,18 +620,8 @@ router.get("/student/progress", requireAuth, async (req, res): Promise<void> => 
       .from(lessonsTable)
       .where(eq(lessonsTable.courseId, courseId));
 
-    const progressRows = await db
-      .select()
-      .from(userProgressTable)
-      .where(
-        and(
-          eq(userProgressTable.userId, req.userId!),
-          eq(userProgressTable.completed, true)
-        )
-      );
-
     const completedInCourse = progressRows.filter((p) =>
-      lessons.some((l) => l.id === p.lessonId)
+      p.completed && lessons.some((l) => l.id === p.lessonId)
     );
 
     const totalLessons = lessons.length;
@@ -610,8 +629,8 @@ router.get("/student/progress", requireAuth, async (req, res): Promise<void> => 
     const progressPercent = totalLessons > 0 ? Math.round((completedLessons / totalLessons) * 100) : 0;
     const isCompleted = totalLessons > 0 && completedLessons === totalLessons;
 
-    const lastActivity = completedInCourse
-      .sort((a, b) => (b.completedAt?.getTime() ?? 0) - (a.completedAt?.getTime() ?? 0))[0];
+    const lastActivity = progressRows.filter(p => lessons.some(l => l.id === p.lessonId))
+      .sort((a, b) => Math.max(b.completedAt?.getTime() ?? 0, b.lastViewedAt?.getTime() ?? 0) - Math.max(a.completedAt?.getTime() ?? 0, a.lastViewedAt?.getTime() ?? 0))[0];
 
     enrolledCourses.push({
       courseId: course.id,
@@ -621,25 +640,17 @@ router.get("/student/progress", requireAuth, async (req, res): Promise<void> => 
       completedLessons,
       progressPercent,
       isCompleted,
-      lastActivityAt: lastActivity?.completedAt?.toISOString() ?? null,
+      lastActivityAt: lastActivity ? new Date(Math.max(lastActivity.completedAt?.getTime() ?? 0, lastActivity.lastViewedAt?.getTime() ?? 0)).toISOString() : null,
     });
   }
 
-  const allProgressRows = await db
-    .select()
-    .from(userProgressTable)
-    .where(
-      and(
-        eq(userProgressTable.userId, req.userId!),
-        eq(userProgressTable.completed, true)
-      )
-    );
+  const allProgressRows = progressRows;
 
   res.json({
     totalEnrolled: enrollments.length,
     totalCompleted: enrolledCourses.filter((c) => c.isCompleted).length,
     totalLessons: enrolledCourses.reduce((sum, c) => sum + c.totalLessons, 0),
-    completedLessons: allProgressRows.length,
+    completedLessons: allProgressRows.filter(row => row.completed).length,
     enrolledCourses,
   });
 });
@@ -678,12 +689,12 @@ router.get("/courses/:courseId/progress", requireAuth, async (req, res): Promise
     .where(
       and(
         eq(userProgressTable.userId, req.userId!),
-        eq(userProgressTable.completed, true)
+
       )
     );
 
   const completedInCourse = progressRows.filter((p) =>
-    lessons.some((l) => l.id === p.lessonId)
+    p.completed && lessons.some((l) => l.id === p.lessonId)
   );
 
   const totalLessons = lessons.length;
@@ -691,8 +702,8 @@ router.get("/courses/:courseId/progress", requireAuth, async (req, res): Promise
   const progressPercent = totalLessons > 0 ? Math.round((completedLessons / totalLessons) * 100) : 0;
   const isCompleted = totalLessons > 0 && completedLessons === totalLessons;
 
-  const lastActivity = completedInCourse
-    .sort((a, b) => (b.completedAt?.getTime() ?? 0) - (a.completedAt?.getTime() ?? 0))[0];
+  const lastActivity = progressRows.filter(p => lessons.some(l => l.id === p.lessonId))
+    .sort((a, b) => Math.max(b.completedAt?.getTime() ?? 0, b.lastViewedAt?.getTime() ?? 0) - Math.max(a.completedAt?.getTime() ?? 0, a.lastViewedAt?.getTime() ?? 0))[0];
 
   res.json({
     courseId: course.id,
@@ -702,7 +713,7 @@ router.get("/courses/:courseId/progress", requireAuth, async (req, res): Promise
     completedLessons,
     progressPercent,
     isCompleted,
-    lastActivityAt: lastActivity?.completedAt?.toISOString() ?? null,
+    lastActivityAt: lastActivity ? new Date(Math.max(lastActivity.completedAt?.getTime() ?? 0, lastActivity.lastViewedAt?.getTime() ?? 0)).toISOString() : null,
   });
 });
 
