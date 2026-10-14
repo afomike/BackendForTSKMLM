@@ -22,7 +22,7 @@ Reviewed on 14 October 2026. Projects: `BackendForTSKMLM` and sibling `SeedSower
 ## Verification and operating requirements
 
 - Backend and frontend TypeScript checks and production builds were run.
-- Backend tests pass: 31 tests, including account/lesson HTTP scenarios and download/rate-limit tests.
+- Backend tests cover account/lesson HTTP scenarios, course revision behavior, and download/rate-limit rules.
 - HTTP tests mock database reads/writes. They do not validate a real PostgreSQL lock, foreign-key cascade or concurrent transaction execution.
 - Existing migrations define cascades for enrollment, lesson progress, quiz attempts and assignment submissions, and set deleted reviewers to null. Account deletion relies on these migrations being installed. No migration was added or applied during this work.
 - Use the Users navigation entry after signing in as an admin. Existing `/admin/students` links continue to work.
@@ -53,3 +53,15 @@ These items require additional implementation or environment-level verification;
 - **Navigation:** account menus include course/user/dashboard links and admin site settings on smaller screens. The profile uses the matching admin/student layout.
 
 Deploy backend and frontend together. Configure additional trusted download providers in `DOWNLOAD_ALLOWED_HOSTS` if existing lessons use other hosting services. Existing database migrations still need to be installed; this pass did not alter schema or live records. Browser and real database end-to-end checks remain outstanding.
+
+## Course updates and student completion
+
+- Adding a lesson changes the course's completion calculation immediately on the next API read.
+- Adding/replacing a lesson part or changing its learning instructions reopens that lesson for students. Unchanged part completion/download records remain intact; changed or removed part records are cleared. Other lessons keep their progress.
+- The lesson editor preserves part IDs. Older clients that omit IDs are matched to unchanged files, so renaming a title does not unnecessarily reset progress.
+- Titles, durations, thumbnails, lesson ordering and removals do not impose new learning work. These edits preserve valid completion.
+- New or changed quizzes clear old quiz passes and reopen lesson completion. Saving an identical quiz keeps previous work.
+- Existing assignment submissions remain stored; reviews return to pending when course requirements change.
+- Course, lesson, dashboard and certificate queries refresh when opened/focused and every 30 seconds while active. Admin edits invalidate related cached queries. Invalid certificates are no longer supported by the completion API once required work remains.
+- Completion and quiz writes check the lesson revision under a row lock. A page opened before an edit receives a refresh-required response rather than restoring an outdated completed state. Downloads of an older revision do not mark the revised content as read.
+- On a subsequent lesson save, tracked unfinished parts can repair an older incorrectly completed flag. There is no blanket reset/backfill of historical student data and no schema change.

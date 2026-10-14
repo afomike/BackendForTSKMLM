@@ -4,6 +4,7 @@ import { pipeline } from "node:stream/promises";
 import { fetchDownload, validateDownloadUrl } from "../lib/download-source.js";
 import { ObjectStorageService } from "../lib/objectStorage.js";
 import { lessonAccess } from "../lib/lesson-access.js";
+import { withLessonRevision } from "../lib/course-revision.js";
 import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable, quizzesTable, quizAttemptsTable, assignmentSubmissionsTable } from "../lib/db.js";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "../lib/auth.js";
@@ -110,12 +111,15 @@ async function writeResponse(res: import("express").Response, data: Uint8Array):
   await new Promise<void>((resolve, reject) => res.write(data, error => error ? reject(error) : resolve()));
 }
 
-async function markDownloaded(userId: string, lessonId: string, partIds: string[]): Promise<void> {
-  const [existing] = await db.select().from(userProgressTable).where(and(eq(userProgressTable.userId, userId), eq(userProgressTable.lessonId, lessonId)));
-  const downloadedParts = Array.from(new Set([...(existing?.downloadedParts ?? []), ...partIds]));
-  const completedParts = Array.from(new Set([...(existing?.completedParts ?? []), ...partIds]));
-  await db.insert(userProgressTable).values({ userId, lessonId, downloadedParts, completedParts })
-    .onConflictDoUpdate({ target: [userProgressTable.userId, userProgressTable.lessonId], set: { downloadedParts, completedParts } });
+async function markDownloaded(userId: string, lesson: typeof lessonsTable.$inferSelect, partIds: string[]): Promise<void> {
+  await withLessonRevision(lesson, undefined, async tx => {
+    const lessonId = lesson.id;
+    const [existing] = await tx.select().from(userProgressTable).where(and(eq(userProgressTable.userId, userId), eq(userProgressTable.lessonId, lessonId)));
+    const downloadedParts = Array.from(new Set([...(existing?.downloadedParts ?? []), ...partIds]));
+    const completedParts = Array.from(new Set([...(existing?.completedParts ?? []), ...partIds]));
+    await tx.insert(userProgressTable).values({ userId, lessonId, downloadedParts, completedParts })
+      .onConflictDoUpdate({ target: [userProgressTable.userId, userProgressTable.lessonId], set: { downloadedParts, completedParts } });
+  });
 }
 
 async function resolveSource(rawUrl: string, req: import("express").Request): Promise<URL | null> {
@@ -256,7 +260,7 @@ router.get("/courses/:courseId/download", requireAuth, async (req, res): Promise
   if (files.length === 0) { res.status(422).json({ error: "This course has no downloadable files" }); return; }
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${archiveName(course.title)}.zip`)}`);
   const downloaded = await streamZip(req, res, files);
-  await Promise.all([...downloaded.entries()].map(([lessonId, partIds]) => markDownloaded(req.userId!, lessonId, partIds)));
+  await Promise.all([...downloaded.entries()].map(([lessonId, partIds]) => markDownloaded(req.userId!, lessons.find(lesson => lesson.id === lessonId)!, partIds)));
 });
 
 router.get("/lessons/:id/download", requireAuth, async (req, res): Promise<void> => {
@@ -276,7 +280,7 @@ router.get("/lessons/:id/download", requireAuth, async (req, res): Promise<void>
   if (files.length === 0) { res.status(422).json({ error: "This lesson has no downloadable files" }); return; }
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${archiveName(lesson.title)}.zip`)}`);
   const downloaded = await streamZip(req, res, files);
-  await markDownloaded(req.userId!, lesson.id, downloaded.get(lesson.id) ?? []);
+  await markDownloaded(req.userId!, lesson, downloaded.get(lesson.id) ?? []);
 });
 
 // Streams one hosted file as an attachment. A part is marked downloaded/read
@@ -336,7 +340,7 @@ router.get("/lessons/:id/parts/:partId/download", requireAuth, async (req, res):
   if (contentLength) res.setHeader("Content-Length", contentLength);
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(sourceFilename(part.title!, source, contentType, part.contentType))}`);
   await pipeline(Readable.fromWeb(upstream.body as ReadableStream<Uint8Array>), res);
-  await markDownloaded(req.userId!, lessonId, [partId]);
+  await markDownloaded(req.userId!, lesson, [partId]);
 });
 
 async function hasPassedLessonQuiz(userId: string, lessonId: string): Promise<boolean> {
@@ -411,18 +415,22 @@ router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void
     return;
   }
 
-  await db
-    .insert(userProgressTable)
-    .values({
-      userId: req.userId!,
-      lessonId,
-      completed: true,
-      completedAt: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: [userProgressTable.userId, userProgressTable.lessonId],
-      set: { completed: true, completedAt: new Date() },
+  const saved = await withLessonRevision(lesson, (req.body ?? {}).lessonUpdatedAt, async tx => {
+    await tx
+      .insert(userProgressTable)
+      .values({
+        userId: req.userId!,
+        lessonId,
+        completed: true,
+        completedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [userProgressTable.userId, userProgressTable.lessonId],
+        set: { completed: true, completedAt: new Date() },
     });
+
+  });
+  if (!saved) { res.status(409).json({ error: "This lesson was updated. Refresh it before completing it." }); return; }
 
   res.json({ message: "Lesson marked as completed" });
 });
@@ -460,26 +468,21 @@ router.post("/lessons/:id/parts/:partId/complete", requireAuth, async (req, res)
     return;
   }
 
-  const [existing] = await db
-    .select()
-    .from(userProgressTable)
-    .where(and(eq(userProgressTable.userId, req.userId!), eq(userProgressTable.lessonId, lessonId)));
-  const completedPartsSet = new Set<string>();
-  for (const savedPart of existing?.completedParts ?? []) {
-    if (typeof savedPart === "string" && knownPartIds.includes(savedPart)) {
-      completedPartsSet.add(savedPart);
-    }
-  }
-  completedPartsSet.add(partId);
-  const completedParts = Array.from(completedPartsSet);
-
-  await db
-    .insert(userProgressTable)
-    .values({ userId: req.userId!, lessonId, completedParts })
-    .onConflictDoUpdate({
-      target: [userProgressTable.userId, userProgressTable.lessonId],
-      set: { completedParts },
+  let completedParts: string[] = [];
+  const saved = await withLessonRevision(lesson, (req.body ?? {}).lessonUpdatedAt, async tx => {
+    const [existing] = await tx.select().from(userProgressTable)
+      .where(and(eq(userProgressTable.userId, req.userId!), eq(userProgressTable.lessonId, lessonId)));
+    completedParts = Array.from(new Set([...(existing?.completedParts ?? []).filter(id => knownPartIds.includes(id)), partId]));
+    await tx
+      .insert(userProgressTable)
+      .values({ userId: req.userId!, lessonId, completedParts })
+      .onConflictDoUpdate({
+        target: [userProgressTable.userId, userProgressTable.lessonId],
+        set: { completedParts },
     });
+
+  });
+  if (!saved) { res.status(409).json({ error: "This lesson was updated. Refresh it before completing it." }); return; }
 
   res.json({ completedPartIds: completedParts, completedPartIndexes: completedParts });
 });
@@ -541,18 +544,22 @@ router.patch("/lessons/:id/progress", requireAuth, async (req, res): Promise<voi
     }
   }
 
-  await db
-    .insert(userProgressTable)
-    .values({
-      userId: req.userId!,
-      lessonId,
-      completed: isCompleted,
-      completedAt: isCompleted ? new Date() : null,
-    })
-    .onConflictDoUpdate({
-      target: [userProgressTable.userId, userProgressTable.lessonId],
-      set: { completed: isCompleted, completedAt: isCompleted ? new Date() : null },
+  const saved = await withLessonRevision(lesson, (req.body ?? {}).lessonUpdatedAt, async tx => {
+    await tx
+      .insert(userProgressTable)
+      .values({
+        userId: req.userId!,
+        lessonId,
+        completed: isCompleted,
+        completedAt: isCompleted ? new Date() : null,
+      })
+      .onConflictDoUpdate({
+        target: [userProgressTable.userId, userProgressTable.lessonId],
+        set: { completed: isCompleted, completedAt: isCompleted ? new Date() : null },
     });
+
+  });
+  if (!saved) { res.status(409).json({ error: "This lesson was updated. Refresh it before completing it." }); return; }
 
   res.json({ message: "Progress updated", completed: isCompleted });
 });

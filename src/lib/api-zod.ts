@@ -71,9 +71,9 @@ export const CreateLessonParams = z.object({
 
 export const LessonPartSchema = z.object({
   partId: z.string().optional(),
-  title: z.string().min(1),
+  title: z.string().trim().min(1),
   contentType: z.enum(["video", "audio", "pdf"]),
-  fileUrl: z.string().min(1),
+  fileUrl: z.string().trim().min(1),
   description: z.string().optional(),
   duration: z.number().nullable().optional(),
   // Undefined uses the safe default: YouTube content is streaming-only and
@@ -111,7 +111,10 @@ export const UpdateLessonBody = z.object({
   lessonOrder: z.number().optional(),
   contentType: z.enum(["video", "audio", "pdf"]).optional(),
   fileUrl: z.string().optional(),
-  parts: z.array(LessonPartSchema).optional(),
+  parts: z.array(LessonPartSchema).min(1).refine(parts => {
+    const ids = parts.flatMap(part => part.partId ? [part.partId] : []);
+    return new Set(ids).size === ids.length;
+  }, "Part IDs must be unique").optional(),
   duration: z.number().nullable().optional(),
 });
 

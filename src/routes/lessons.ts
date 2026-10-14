@@ -4,6 +4,8 @@ import { db, lessonsTable, enrollmentsTable, userProgressTable, quizzesTable, qu
 import { eq, and, asc, gte, sql, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin, optionalAuth } from "../lib/auth.js";
 import { isLessonLocked, lessonAccess } from "../lib/lesson-access.js";
+import { reconcileParts, revisionProgress } from "../lib/lesson-revision.js";
+import { reopenCourseReview, clearLessonQuizAttempts } from "../lib/course-revision.js";
 import {
   ListLessonsParams,
   CreateLessonParams,
@@ -46,7 +48,8 @@ function isPartDownloadable(part: Pick<LessonPart, "fileUrl" | "downloadable">):
   return part.downloadable ?? !isYouTubeUrl(part.fileUrl);
 }
 
-function cleanLessonParts(parts: Partial<LessonPart>[] | undefined): LessonPart[] {
+function cleanLessonParts(parts: Partial<LessonPart>[] | undefined, before: Partial<LessonPart>[] = []): LessonPart[] {
+  parts = reconcileParts(before, parts ?? []) as Partial<LessonPart>[];
   return (parts ?? [])
     .map((part) => ({
       partId: part.partId ?? randomUUID(),
@@ -218,6 +221,7 @@ router.post("/courses/:courseId/lessons", requireAdmin, async (req, res): Promis
       .update(lessonsTable)
       .set({ lessonOrder: sql`${lessonsTable.lessonOrder} - 999999` })
       .where(and(eq(lessonsTable.courseId, params.data.courseId), gte(lessonsTable.lessonOrder, insertOrder + 1000000)));
+    await reopenCourseReview(tx, params.data.courseId);
     return [created];
   });
 
@@ -325,6 +329,7 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
     duration: lesson.duration ?? null,
     completedPartIds,
     downloadedPartIds,
+    updatedAt: lesson.updatedAt.toISOString(),
     createdAt: lesson.createdAt.toISOString(),
   });
 });
@@ -342,59 +347,63 @@ router.patch("/lessons/:id", requireAdmin, async (req, res): Promise<void> => {
     return;
   }
 
-  const updates: Record<string, unknown> = {};
-  if (parsed.data.title != null) updates.title = parsed.data.title;
-  if (parsed.data.lessonOrder != null) updates.lessonOrder = parsed.data.lessonOrder;
-  if (parsed.data.contentType != null) updates.contentType = parsed.data.contentType;
-  if (parsed.data.fileUrl != null) updates.fileUrl = parsed.data.fileUrl;
-  if (parsed.data.parts !== undefined) {
-    const parts = cleanLessonParts(parsed.data.parts);
-    if (parts.length === 0) {
-      res.status(400).json({ error: "At least one lesson part with a title and content file is required" });
-      return;
+  let progressReset = false;
+  const lesson = await db.transaction(async tx => {
+    const [before] = await tx.select().from(lessonsTable)
+      .where(eq(lessonsTable.id, params.data.id)).for("update");
+    if (!before) return null;
+    const beforeParts = serializeLessonParts(before.parts, before.id, {
+      title: before.title, contentType: asContentType(before.contentType), fileUrl: before.fileUrl, duration: before.duration,
+    });
+    const updates: Record<string, unknown> = {};
+    if (parsed.data.title != null) updates.title = parsed.data.title;
+    if (parsed.data.lessonOrder != null) updates.lessonOrder = parsed.data.lessonOrder;
+    if (parsed.data.contentType != null) updates.contentType = parsed.data.contentType;
+    if (parsed.data.fileUrl != null) updates.fileUrl = parsed.data.fileUrl;
+    if (parsed.data.parts !== undefined) {
+      const parts = cleanLessonParts(parsed.data.parts, beforeParts);
+      updates.parts = parts;
+      updates.contentType = parts[0].contentType;
+      updates.fileUrl = parts[0].fileUrl;
+      updates.duration = parts[0].duration ?? null;
+    } else if (Array.isArray(before.parts) && before.parts.length && (parsed.data.fileUrl !== undefined || parsed.data.contentType !== undefined)) {
+      updates.parts = beforeParts.map((part, index) => index === 0 ? {
+        ...part, fileUrl: parsed.data.fileUrl ?? part.fileUrl, contentType: parsed.data.contentType ?? part.contentType,
+      } : part);
     }
-
-    const firstPart = parts[0];
-    updates.parts = parts;
-    if (firstPart) {
-      updates.contentType = firstPart.contentType;
-      updates.fileUrl = firstPart.fileUrl;
-      updates.duration = firstPart.duration ?? null;
+    if (parsed.data.duration !== undefined) updates.duration = parsed.data.duration ?? null;
+    const [updated] = await tx.update(lessonsTable).set(updates)
+      .where(eq(lessonsTable.id, params.data.id)).returning();
+    const afterParts = serializeLessonParts(updated.parts, updated.id, {
+      title: updated.title, contentType: asContentType(updated.contentType), fileUrl: updated.fileUrl, duration: updated.duration,
+    });
+    const revision = revisionProgress(beforeParts, afterParts);
+    progressReset = revision.requiresCompletion;
+    if (parsed.data.parts !== undefined || revision.requiresCompletion) {
+      const rows = await tx.select().from(userProgressTable).where(eq(userProgressTable.lessonId, updated.id));
+      for (const progress of rows) {
+        const completedParts = progress.completedParts ?? [];
+        // Also repair a previously saved "finished" flag when tracked parts
+        // show that the current lesson still contains unfinished work.
+        const needsCompletion = revision.requiresCompletion || (progress.completed && completedParts.length > 0 &&
+          afterParts.some(part => !completedParts.includes(part.partId)));
+        progressReset ||= needsCompletion;
+        await tx.update(userProgressTable).set({
+          completedParts: completedParts.filter(id => revision.unchanged.has(id)),
+          downloadedParts: (progress.downloadedParts ?? []).filter(id => revision.unchanged.has(id)),
+          ...(needsCompletion ? { completed: false, completedAt: null } : {}),
+        }).where(eq(userProgressTable.id, progress.id));
+      }
     }
-  }
-  if (parsed.data.duration !== undefined) updates.duration = parsed.data.duration ?? null;
-
-  const [lesson] = await db
-    .update(lessonsTable)
-    .set(updates)
-    .where(eq(lessonsTable.id, params.data.id))
-    .returning();
-
-  if (!lesson) {
-    res.status(404).json({ error: "Lesson not found" });
-    return;
-  }
-
-  // Parts live inside the lesson JSON, so removing one must also remove its
-  // progress/download references from every student record.
-  if (parsed.data.parts !== undefined) {
-    const validPartIds = new Set(serializeLessonParts(lesson.parts, lesson.id, {
-      title: lesson.title,
-      contentType: asContentType(lesson.contentType),
-      fileUrl: lesson.fileUrl,
-      duration: lesson.duration,
-    }).map((part) => part.partId));
-    const progressRows = await db.select().from(userProgressTable)
-      .where(eq(userProgressTable.lessonId, lesson.id));
-    await Promise.all(progressRows.map((progress) => {
-      const completedParts = progress.completedParts.filter((partId) => validPartIds.has(partId));
-      const downloadedParts = progress.downloadedParts.filter((partId) => validPartIds.has(partId));
-      return db.update(userProgressTable).set({ completedParts, downloadedParts })
-        .where(eq(userProgressTable.id, progress.id));
-    }));
-  }
-
+    if (progressReset) {
+      await clearLessonQuizAttempts(tx, updated.id);
+      await reopenCourseReview(tx, updated.courseId);
+    }
+    return updated;
+  });
+  if (!lesson) { res.status(404).json({ error: "Lesson not found" }); return; }
   res.json({
+    progressReset,
     id: lesson.id,
     courseId: lesson.courseId,
     title: lesson.title,

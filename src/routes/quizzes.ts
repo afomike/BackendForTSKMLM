@@ -8,9 +8,10 @@ import {
   lessonsTable,
   enrollmentsTable,
 } from "../lib/db.js";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { requireAuth, requireAdmin } from "../lib/auth.js";
 import { lessonAccess } from "../lib/lesson-access.js";
+import { reopenCourseReview, reopenLessonCompletion, withLessonRevision } from "../lib/course-revision.js";
 
 const router = Router();
 
@@ -114,6 +115,7 @@ router.get("/lessons/:lessonId/quiz", requireAuth, async (req, res): Promise<voi
     id: quiz.id,
     lessonId: quiz.lessonId,
     passingScore: quiz.passingScore,
+    lessonUpdatedAt: lesson.updatedAt.toISOString(),
     questions: questionsWithOptions,
   });
 });
@@ -145,7 +147,22 @@ router.put("/lessons/:lessonId/quiz", requireAuth, requireAdmin, async (req, res
 
   const { passingScore, questions } = parsed;
 
+  let progressReset = false;
   const quizId = await db.transaction(async tx => {
+    await tx.execute(sql`select id from lessons where id = ${lessonId} for update`);
+    const [previous] = await tx.select().from(quizzesTable).where(eq(quizzesTable.lessonId, lessonId));
+    if (previous) {
+      const savedQuestions = await tx.select().from(quizQuestionsTable)
+        .where(eq(quizQuestionsTable.quizId, previous.id)).orderBy(quizQuestionsTable.questionOrder);
+      const saved = [];
+      for (const question of savedQuestions) {
+        const options = await tx.select().from(quizOptionsTable)
+          .where(eq(quizOptionsTable.questionId, question.id)).orderBy(quizOptionsTable.optionOrder);
+        saved.push({ questionText: question.questionText.trim(), options: options.map(option => ({ optionText: option.optionText.trim(), isCorrect: option.isCorrect })) });
+      }
+      const requested = questions.map(question => ({ questionText: question.questionText.trim(), options: question.options }));
+      if (previous.passingScore === passingScore && JSON.stringify(saved) === JSON.stringify(requested)) return previous.id;
+    }
     // Upsert quiz row
     const [quiz] = await tx
       .insert(quizzesTable)
@@ -178,10 +195,16 @@ router.put("/lessons/:lessonId/quiz", requireAuth, requireAdmin, async (req, res
       }
     }
 
+    await tx.delete(quizAttemptsTable).where(eq(quizAttemptsTable.quizId, quiz.id));
+    await reopenLessonCompletion(tx, lessonId);
+    await reopenCourseReview(tx, lesson.courseId);
+    await tx.update(lessonsTable).set({ updatedAt: new Date() }).where(eq(lessonsTable.id, lessonId));
+    progressReset = true;
+
     return quiz.id;
   });
 
-  res.json({ message: "Quiz saved", quizId });
+  res.json({ message: "Quiz saved", quizId, progressReset });
 });
 
 // ── Admin: delete quiz for a lesson ──────────────────────────────────────────
@@ -296,12 +319,10 @@ router.post("/lessons/:lessonId/quiz/attempt", requireAuth, async (req, res): Pr
   const passed = score >= quiz.passingScore;
 
   // Save attempt
-  await db.insert(quizAttemptsTable).values({
-    quizId: quiz.id,
-    userId: req.userId!,
-    score,
-    passed,
+  const saved = await withLessonRevision(lesson, (req.body ?? {}).lessonUpdatedAt, async tx => {
+    await tx.insert(quizAttemptsTable).values({ quizId: quiz.id, userId: req.userId!, score, passed });
   });
+  if (!saved) { res.status(409).json({ error: "This lesson was updated. Refresh it before submitting the quiz." }); return; }
 
   res.json({ score, passingScore: quiz.passingScore, passed, correct, total, feedback });
 });

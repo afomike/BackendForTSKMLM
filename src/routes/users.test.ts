@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 // Exercise real HTTP routes and authentication without contacting a live DB.
 process.env.SESSION_SECRET = "test-only-session-secret-never-use-in-production";
 process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
-const { db, pool } = await import("../lib/db.js");
+const { db, pool, userProgressTable, lessonsTable, assignmentSubmissionsTable, quizAttemptsTable } = await import("../lib/db.js");
 const { signToken, optionalAuth, credentialKey, verifyToken } = await import("../lib/auth.js");
 const { default: usersRouter } = await import("./users.js");
 const { default: authRouter } = await import("./auth.js");
@@ -15,6 +15,7 @@ const { default: progressRouter } = await import("./progress.js");
 const { default: lessonRouter } = await import("./lessons.js");
 const { default: courseRouter } = await import("./courses.js");
 const { isLessonLocked } = await import("../lib/lesson-access.js");
+const { withLessonRevision } = await import("../lib/course-revision.js");
 const adminId = "11111111-1111-4111-8111-111111111111";
 const targetId = "22222222-2222-4222-8222-222222222222";
 const admin = { id: adminId, fullname: "Admin", email: "admin@example.com", role: "admin", status: "active", createdAt: new Date(), passwordHash: "secret-hash", avatarUrl: null };
@@ -23,10 +24,13 @@ let selections: unknown[][] = [];
 let inserted: Record<string, unknown> | undefined;
 let mutations: string[] = [];
 let returned: unknown[] = [];
+let updateValues: Array<{ table: unknown; values: Record<string, unknown> }> = [];
+let insertResults: unknown[][] | null = null;
+let deletedTables: unknown[] = [];
 
 function chain(rows: unknown[]) {
   const query: any = { then: (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) => Promise.resolve(rows).then(resolve, reject) };
-  for (const method of ["from", "where", "orderBy", "limit", "offset", "groupBy", "onConflictDoNothing", "returning", "set"]) query[method] = () => query;
+  for (const method of ["from", "where", "orderBy", "limit", "offset", "groupBy", "onConflictDoNothing", "onConflictDoUpdate", "returning", "set", "for"]) query[method] = () => query;
   query.values = (values: Record<string, unknown>) => { inserted = values; return query; };
   return query;
 }
@@ -37,9 +41,14 @@ test("account administration HTTP behavior", async t => {
     assert.ok(selections.length, "Unexpected database select");
     return chain(selections.shift()!);
   };
-  (db as any).insert = () => { mutations.push("insert"); return chain(returned); };
-  (db as any).update = () => { mutations.push("update"); return chain(returned); };
-  (db as any).delete = () => { mutations.push("delete"); return chain(returned); };
+  (db as any).insert = () => { mutations.push("insert"); return chain(insertResults ? insertResults.shift() ?? [] : returned); };
+  (db as any).update = (table: unknown) => {
+    mutations.push("update");
+    const query = chain(returned);
+    query.set = (values: Record<string, unknown>) => { updateValues.push({ table, values }); return query; };
+    return query;
+  };
+  (db as any).delete = (table: unknown) => { mutations.push("delete"); deletedTables.push(table); return chain(returned); };
   (db as any).transaction = async (callback: any) => callback({ ...db, select: db.select, insert: db.insert, update: db.update, delete: db.delete, execute: async () => { mutations.push("lock"); } });
   const app = express();
   app.use(express.json());
@@ -53,7 +62,7 @@ test("account administration HTTP behavior", async t => {
   const request = (path: string, method = "GET", body?: unknown, auth: string | null = token) => fetch(`http://127.0.0.1:${address.port}${path}`, {
     method, headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Bearer ${auth}` } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}),
   });
-  const reset = (rows: unknown[][], result: unknown[] = []) => { selections = rows; returned = result; mutations = []; inserted = undefined; };
+  const reset = (rows: unknown[][], result: unknown[] = []) => { selections = rows; returned = result; mutations = []; inserted = undefined; updateValues = []; insertResults = null; deletedTables = []; };
   try {
     await t.test("anonymous and malformed tokens cannot create accounts", async () => {
       reset([]);
@@ -255,6 +264,83 @@ test("account administration HTTP behavior", async t => {
       reset([[student], [{ id: "quiz", lessonId: locked.id }], [locked], lessons, [enrollment], []]);
       assert.equal((await request(`/lessons/${locked.id}/quiz`)).status, 403);
       assert.equal(selections.length, 0);
+    });
+    await t.test("adding a part to a finished lesson clears completion and preserves unchanged part progress", async () => {
+      const parts = [{ partId: "original", title: "Original", contentType: "video", fileUrl: "https://res.cloudinary.com/original.mp4" }];
+      const before = { id: targetId, courseId: adminId, title: "Lesson", lessonOrder: 1, parts, contentType: "video", fileUrl: parts[0].fileUrl, duration: null, createdAt: new Date(), updatedAt: new Date() };
+      const after = { ...before, parts: [...parts, { partId: "new", title: "New", contentType: "pdf", fileUrl: "https://res.cloudinary.com/new.pdf" }] };
+      const progress = { id: "progress", completed: true, completedAt: new Date(), completedParts: ["original"], downloadedParts: ["original"] };
+      reset([[admin], [before], [progress], []], [after]);
+      const response = await request(`/lessons/${targetId}`, "PATCH", { parts: after.parts });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).progressReset, true);
+      const saved = updateValues.find(update => update.table === userProgressTable)!.values;
+      assert.equal(saved.completed, false);
+      assert.equal(saved.completedAt, null);
+      assert.deepEqual(saved.completedParts, ["original"]);
+      assert.deepEqual(saved.downloadedParts, ["original"]);
+      assert.equal(updateValues.find(update => update.table === assignmentSubmissionsTable)?.values.status, "pending");
+      assert.equal(selections.length, 0);
+    });
+    await t.test("a title-only save from an older editor retains part IDs and completion", async () => {
+      const originalPart = { partId: "original", title: "Original", contentType: "video", fileUrl: "https://res.cloudinary.com/original.mp4" };
+      const before = { id: targetId, courseId: adminId, title: "Lesson", lessonOrder: 1, parts: [originalPart], contentType: "video", fileUrl: originalPart.fileUrl, duration: null, createdAt: new Date(), updatedAt: new Date() };
+      reset([[admin], [before], [{ id: "progress", completed: true, completedParts: ["original"], downloadedParts: [] }]], [{ ...before, title: "Renamed lesson" }]);
+      const { partId: _id, ...withoutId } = originalPart;
+      const response = await request(`/lessons/${targetId}`, "PATCH", { title: "Renamed lesson", parts: [withoutId] });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).progressReset, false);
+      assert.equal((updateValues.find(update => update.table === lessonsTable)!.values.parts as any[])[0].partId, "original");
+      assert.equal(updateValues.find(update => update.table === userProgressTable)!.values.completed, undefined);
+      assert.ok(!updateValues.some(update => update.table === assignmentSubmissionsTable));
+    });
+    await t.test("a new lesson changes a formerly completed course to unfinished", async () => {
+      const course = { id: adminId, title: "Course", thumbnailUrl: null };
+      const completedLesson = { id: targetId };
+      const addedLesson = { id: "33333333-3333-4333-8333-333333333333" };
+      const progress = { lessonId: targetId, completed: true, completedAt: new Date() };
+      reset([[student], [{ courseId: adminId }], [course], [completedLesson, addedLesson], [progress], [progress]]);
+      const response = await request("/student/progress");
+      assert.equal(response.status, 200);
+      const body = await response.json();
+      assert.equal(body.totalCompleted, 0);
+      assert.equal(body.enrolledCourses[0].isCompleted, false);
+      assert.equal(body.enrolledCourses[0].progressPercent, 50);
+    });
+    await t.test("stale completion writes cannot restore progress after a lesson revision", async () => {
+      const lesson = { id: targetId, updatedAt: new Date("2026-10-14T10:00:00Z") } as any;
+      let written = false;
+      reset([[{ ...lesson, updatedAt: new Date("2026-10-14T11:00:00Z") }]]);
+      assert.equal(await withLessonRevision(lesson, undefined, async () => { written = true; }), false);
+      assert.equal(written, false);
+      reset([[lesson]]);
+      assert.equal(await withLessonRevision(lesson, "2026-10-14T09:00:00.000Z", async () => { written = true; }), false);
+      assert.equal(written, false);
+    });
+    await t.test("new quiz requirements reset completion and clear old passes", async () => {
+      const lesson = { id: targetId, courseId: adminId };
+      reset([[admin], [admin], [lesson], []]);
+      insertResults = [[{ id: "quiz" }], [{ id: "question" }], [], []];
+      const response = await request(`/lessons/${targetId}/quiz`, "PUT", {
+        passingScore: 70, questions: [{ questionText: "New question", options: [{ optionText: "Yes", isCorrect: true }, { optionText: "No", isCorrect: false }] }],
+      });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).progressReset, true);
+      assert.equal(updateValues.find(update => update.table === userProgressTable)?.values.completed, false);
+      assert.equal(updateValues.find(update => update.table === userProgressTable)?.values.completedAt, null);
+      assert.ok(deletedTables.includes(quizAttemptsTable));
+      assert.equal(updateValues.find(update => update.table === assignmentSubmissionsTable)?.values.status, "pending");
+    });
+    await t.test("saving an unchanged quiz preserves completion and previous passes", async () => {
+      reset([[admin], [admin], [{ id: targetId, courseId: adminId }], [{ id: "quiz", passingScore: 70 }],
+        [{ id: "question", questionText: "Question" }], [{ optionText: "Yes", isCorrect: true }, { optionText: "No", isCorrect: false }]]);
+      const response = await request(`/lessons/${targetId}/quiz`, "PUT", {
+        passingScore: 70, questions: [{ questionText: "Question", options: [{ optionText: "Yes", isCorrect: true }, { optionText: "No", isCorrect: false }] }],
+      });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).progressReset, false);
+      assert.deepEqual(mutations, ["lock"]);
+      assert.deepEqual(deletedTables, []);
     });
   } finally {
     Object.assign(db, original);
