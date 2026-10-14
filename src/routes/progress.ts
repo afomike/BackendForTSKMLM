@@ -148,6 +148,7 @@ async function streamZip(
     file: (typeof files)[number];
     response: Response;
   }> = [];
+  const archivePaths = new Set<string>();
 
   try {
     for (const file of files) {
@@ -173,7 +174,12 @@ async function streamZip(
     const entries: ZipEntry[] = []; const downloaded = new Map<string, string[]>(); let offset = 0;
     res.status(200).setHeader("Content-Type", "application/zip");
     for (const { file, response: upstream } of sources) {
-      const name = Buffer.from(file.path, "utf8"); const entry: ZipEntry = { name, offset, crc: 0, size: 0 };
+      let path = file.path;
+      const extension = path.match(/\.[^/.]+$/)?.[0] ?? "";
+      const base = extension ? path.slice(0, -extension.length) : path;
+      for (let duplicate = 2; archivePaths.has(path.toLowerCase()); duplicate++) path = `${base} (${duplicate})${extension}`;
+      archivePaths.add(path.toLowerCase());
+      const name = Buffer.from(path, "utf8"); const entry: ZipEntry = { name, offset, crc: 0, size: 0 };
       const local = zipLocalHeader(name); await writeResponse(res, local); offset += local.length;
       const reader = upstream.body.getReader();
       try {
@@ -245,7 +251,7 @@ router.get("/courses/:courseId/download", requireAuth, async (req, res): Promise
   const files = lessons.filter(lesson => accessible.has(lesson.id)).flatMap((lesson, lessonIndex) => lessonParts(lesson).filter(canDownload).map((part, partIndex) => {
     const source = new URL(part.fileUrl, `${req.protocol}://${req.get("host")}`);
     const contentType = part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : null;
-    return { lessonId: lesson.id, part, path: `${String(lessonIndex + 1).padStart(2, "0")} - ${archiveName(lesson.title)}/${String(partIndex + 1).padStart(2, "0")} - ${sourceFilename(part.title, source, contentType, part.contentType)}` };
+    return { lessonId: lesson.id, part, path: `${archiveName(lesson.title)}/${sourceFilename(part.title, source, contentType, part.contentType)}` };
   }));
   if (files.length === 0) { res.status(422).json({ error: "This course has no downloadable files" }); return; }
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${archiveName(course.title)}.zip`)}`);
@@ -265,7 +271,7 @@ router.get("/lessons/:id/download", requireAuth, async (req, res): Promise<void>
   const files = lessonParts(lesson).filter(canDownload).map((part, partIndex) => {
     const source = new URL(part.fileUrl, `${req.protocol}://${req.get("host")}`);
     const contentType = part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : null;
-    return { lessonId: lesson.id, part, path: `${String(partIndex + 1).padStart(2, "0")} - ${sourceFilename(part.title, source, contentType, part.contentType)}` };
+    return { lessonId: lesson.id, part, path: sourceFilename(part.title, source, contentType, part.contentType) };
   });
   if (files.length === 0) { res.status(422).json({ error: "This lesson has no downloadable files" }); return; }
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${archiveName(lesson.title)}.zip`)}`);
