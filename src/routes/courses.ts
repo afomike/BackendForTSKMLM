@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db, coursesTable, lessonsTable, enrollmentsTable, userProgressTable, assignmentSubmissionsTable, quizzesTable, quizQuestionsTable, quizOptionsTable, quizAttemptsTable } from "../lib/db.js";
 import { eq, count, and, ilike, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin, optionalAuth } from "../lib/auth.js";
+import { isLessonLocked } from "../lib/lesson-access.js";
 import {
   CreateCourseBody,
   UpdateCourseBody,
@@ -229,11 +230,7 @@ router.get("/courses/:id", optionalAuth, async (req, res): Promise<void> => {
   // build lessons with progress & locking
   const lessonsWithProgress = lessons.map((lesson, index) => {
     const isCompleted = completedLessonIds.has(lesson.id);
-    const prevCompleted = index === 0 || completedLessonIds.has(lessons[index - 1]!.id);
-    const isLocked = isEnrolled ? !prevCompleted && index !== 0 : index !== 0;
-    const progressRow = isCompleted
-      ? { completedAt: null } // we'd need to fetch this separately
-      : null;
+    const isLocked = isLessonLocked(lessons, index, isEnrolled, completedLessonIds, req.userRole);
 
     return {
       id: lesson.id,
@@ -241,8 +238,8 @@ router.get("/courses/:id", optionalAuth, async (req, res): Promise<void> => {
       title: lesson.title,
       lessonOrder: lesson.lessonOrder,
       contentType: asContentType(lesson.contentType),
-      fileUrl: lesson.fileUrl,
-      parts: serializeLessonParts(lesson.parts, lesson.id, {
+      fileUrl: isLocked ? "" : lesson.fileUrl,
+      parts: isLocked ? [] : serializeLessonParts(lesson.parts, lesson.id, {
         title: lesson.title,
         contentType: asContentType(lesson.contentType),
         fileUrl: lesson.fileUrl,
@@ -251,7 +248,7 @@ router.get("/courses/:id", optionalAuth, async (req, res): Promise<void> => {
       duration: lesson.duration ?? null,
       createdAt: lesson.createdAt.toISOString(),
       isCompleted,
-      isLocked: isEnrolled ? (!prevCompleted && index !== 0) : (index !== 0),
+      isLocked,
       completedAt: null,
     };
   });

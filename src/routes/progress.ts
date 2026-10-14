@@ -1,5 +1,9 @@
 import { Router } from "express";
 import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { fetchDownload, validateDownloadUrl } from "../lib/download-source.js";
+import { ObjectStorageService } from "../lib/objectStorage.js";
+import { lessonAccess } from "../lib/lesson-access.js";
 import { db, userProgressTable, lessonsTable, enrollmentsTable, coursesTable, quizzesTable, quizAttemptsTable, assignmentSubmissionsTable } from "../lib/db.js";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "../lib/auth.js";
@@ -60,7 +64,8 @@ function safeDownloadFilename(title: string, contentType: string | null): string
 }
 
 function sourceFilename(title: string, source: URL, contentType: string | null, declaredType?: string): string {
-  const urlName = decodeURIComponent(source.pathname.split("/").pop() ?? "");
+  let urlName = source.pathname.split("/").pop() ?? "";
+  try { urlName = decodeURIComponent(urlName); } catch { /* Keep malformed escapes as literal filename text. */ }
   const declaredContentType = declaredType === "pdf" ? "application/pdf" : declaredType === "audio" ? "audio/mpeg" : declaredType === "video" ? "video/mp4" : contentType;
   const extension = urlName.match(/\.[a-z0-9]{1,8}$/i)?.[0] ?? safeDownloadFilename("file", declaredContentType).replace("file", "");
   const base = title.replace(/[\\/:*?"<>|]+/g, " ").trim() || "download";
@@ -82,7 +87,7 @@ function crc32(bytes: Uint8Array, current = 0): number {
 
 function zipLocalHeader(name: Buffer): Buffer {
   const header = Buffer.alloc(30 + name.length);
-  header.writeUInt32LE(0x04034b50, 0); header.writeUInt16LE(20, 4); header.writeUInt16LE(0x08, 6);
+  header.writeUInt32LE(0x04034b50, 0); header.writeUInt16LE(20, 4); header.writeUInt16LE(0x0808, 6);
   header.writeUInt16LE(0, 8); header.writeUInt16LE(0, 10); header.writeUInt16LE(0, 12);
   header.writeUInt32LE(0, 14); header.writeUInt32LE(0, 18); header.writeUInt32LE(0, 22);
   header.writeUInt16LE(name.length, 26); header.writeUInt16LE(0, 28); name.copy(header, 30);
@@ -93,7 +98,7 @@ type ZipEntry = { name: Buffer; offset: number; crc: number; size: number };
 function zipCentralHeader(entry: ZipEntry): Buffer {
   const header = Buffer.alloc(46 + entry.name.length);
   header.writeUInt32LE(0x02014b50, 0); header.writeUInt16LE(20, 4); header.writeUInt16LE(20, 6);
-  header.writeUInt16LE(0x08, 8); header.writeUInt16LE(0, 10); header.writeUInt16LE(0, 12); header.writeUInt16LE(0, 14);
+  header.writeUInt16LE(0x0808, 8); header.writeUInt16LE(0, 10); header.writeUInt16LE(0, 12); header.writeUInt16LE(0, 14);
   header.writeUInt32LE(entry.crc, 16); header.writeUInt32LE(entry.size, 20); header.writeUInt32LE(entry.size, 24);
   header.writeUInt16LE(entry.name.length, 28); header.writeUInt16LE(0, 30); header.writeUInt16LE(0, 32);
   header.writeUInt16LE(0, 34); header.writeUInt16LE(0, 36); header.writeUInt32LE(0, 38); header.writeUInt32LE(entry.offset, 42);
@@ -101,7 +106,8 @@ function zipCentralHeader(entry: ZipEntry): Buffer {
 }
 
 async function writeResponse(res: import("express").Response, data: Uint8Array): Promise<void> {
-  if (!res.write(data)) await new Promise<void>((resolve) => res.once("drain", resolve));
+  if (res.destroyed) throw new Error("Download connection closed");
+  await new Promise<void>((resolve, reject) => res.write(data, error => error ? reject(error) : resolve()));
 }
 
 async function markDownloaded(userId: string, lessonId: string, partIds: string[]): Promise<void> {
@@ -115,9 +121,9 @@ async function markDownloaded(userId: string, lessonId: string, partIds: string[
 async function resolveSource(rawUrl: string, req: import("express").Request): Promise<URL | null> {
   try {
     const storagePath = rawUrl.startsWith("/objects/")
-      ? `${req.baseUrl}/storage${rawUrl}`
+      ? (await new ObjectStorageService().getObjectEntityFile(rawUrl)).url
       : rawUrl;
-    const source = new URL(storagePath, `${req.protocol}://${req.get("host")}`);
+    const source = validateDownloadUrl(storagePath);
 
     if (source.hostname === "drive.google.com") {
       const fileId = source.pathname.match(/^\/file\/d\/([^/]+)/)?.[1] ?? source.searchParams.get("id");
@@ -137,51 +143,61 @@ async function streamZip(
   res: import("express").Response,
   files: Array<{ lessonId: string; path: string; part: DownloadPart }>,
 ): Promise<Map<string, string[]>> {
+  if (files.length > 100) throw Object.assign(new Error("Download up to 100 files per archive. Download lessons separately."), { status: 422 });
   const sources: Array<{
     file: (typeof files)[number];
     response: Response;
   }> = [];
 
-  for (const file of files) {
-    const source = file.part.fileUrl ? await resolveSource(file.part.fileUrl, req) : null;
-    if (!source) throw new Error(`Invalid download URL for ${file.part.title ?? "lesson part"}`);
-    let upstream: Response;
-    try {
-      upstream = await fetch(source);
-    } catch {
-      throw new Error(`Could not reach the file for ${file.part.title ?? "lesson part"}`);
+  try {
+    for (const file of files) {
+      const source = file.part.fileUrl ? await resolveSource(file.part.fileUrl, req) : null;
+      if (!source) throw Object.assign(new Error(`Download URL is invalid or its host is not allowed for ${file.part.title ?? "lesson part"}`), { status: 422 });
+      let upstream: Response;
+      try {
+        upstream = await fetchDownload(source);
+      } catch {
+        throw Object.assign(new Error(`Could not reach the file for ${file.part.title ?? "lesson part"}`), { status: 502 });
+      }
+      if (!upstream.ok || !upstream.body || upstream.headers.get("content-type")?.toLowerCase().includes("text/html")) {
+        await upstream.body?.cancel();
+        throw Object.assign(new Error(`Could not download the file for ${file.part.title ?? "lesson part"}`), { status: 502 });
+      }
+      sources.push({ file, response: upstream });
     }
-    if (!upstream.ok || !upstream.body || upstream.headers.get("content-type")?.toLowerCase().includes("text/html")) {
-      throw new Error(`Could not download the file for ${file.part.title ?? "lesson part"}`);
-    }
-    sources.push({ file, response: upstream });
-  }
 
-  if (sources.length === 0) {
-    throw new Error("No downloadable files were found");
-  }
-
-  const entries: ZipEntry[] = []; const downloaded = new Map<string, string[]>(); let offset = 0;
-  res.status(200).setHeader("Content-Type", "application/zip");
-  for (const { file, response: upstream } of sources) {
-    const name = Buffer.from(file.path, "utf8"); const entry: ZipEntry = { name, offset, crc: 0, size: 0 };
-    const local = zipLocalHeader(name); await writeResponse(res, local); offset += local.length;
-    const reader = upstream.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read(); if (done) break;
-      const chunk = Buffer.from(value); entry.crc = crc32(chunk, entry.crc); entry.size += chunk.length;
-      await writeResponse(res, chunk); offset += chunk.length;
+    if (sources.length === 0) {
+      throw new Error("No downloadable files were found");
     }
-    const descriptor = Buffer.alloc(16); descriptor.writeUInt32LE(0x08074b50, 0); descriptor.writeUInt32LE(entry.crc, 4);
-    descriptor.writeUInt32LE(entry.size, 8); descriptor.writeUInt32LE(entry.size, 12); await writeResponse(res, descriptor); offset += descriptor.length;
-    if (file.part.partId) downloaded.set(file.lessonId, [...(downloaded.get(file.lessonId) ?? []), file.part.partId]);
-    entries.push(entry);
+
+    const entries: ZipEntry[] = []; const downloaded = new Map<string, string[]>(); let offset = 0;
+    res.status(200).setHeader("Content-Type", "application/zip");
+    for (const { file, response: upstream } of sources) {
+      const name = Buffer.from(file.path, "utf8"); const entry: ZipEntry = { name, offset, crc: 0, size: 0 };
+      const local = zipLocalHeader(name); await writeResponse(res, local); offset += local.length;
+      const reader = upstream.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read(); if (done) break;
+          const chunk = Buffer.from(value);
+          if (offset + chunk.length > 1024 * 1024 * 1024) throw new Error("Archive exceeds the 1 GB limit");
+          entry.crc = crc32(chunk, entry.crc); entry.size += chunk.length;
+          await writeResponse(res, chunk); offset += chunk.length;
+        }
+      } finally { reader.releaseLock(); }
+      const descriptor = Buffer.alloc(16); descriptor.writeUInt32LE(0x08074b50, 0); descriptor.writeUInt32LE(entry.crc, 4);
+      descriptor.writeUInt32LE(entry.size, 8); descriptor.writeUInt32LE(entry.size, 12); await writeResponse(res, descriptor); offset += descriptor.length;
+      if (file.part.partId) downloaded.set(file.lessonId, [...(downloaded.get(file.lessonId) ?? []), file.part.partId]);
+      entries.push(entry);
+    }
+    const centralOffset = offset;
+    for (const entry of entries) { const central = zipCentralHeader(entry); await writeResponse(res, central); offset += central.length; }
+    const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
+    end.writeUInt32LE(offset - centralOffset, 12); end.writeUInt32LE(centralOffset, 16); await writeResponse(res, end); res.end();
+    return downloaded;
+  } finally {
+    await Promise.all(sources.map(({ response }) => response.body?.cancel().catch(() => {})));
   }
-  const centralOffset = offset;
-  for (const entry of entries) { const central = zipCentralHeader(entry); await writeResponse(res, central); offset += central.length; }
-  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(offset - centralOffset, 12); end.writeUInt32LE(centralOffset, 16); await writeResponse(res, end); res.end();
-  return downloaded;
 }
 
 // Lists every downloadable part in a course. The client can use each URL to
@@ -204,7 +220,8 @@ router.get("/courses/:courseId/downloads", requireAuth, async (req, res): Promis
   const progress = await db.select({ lessonId: userProgressTable.lessonId, downloadedParts: userProgressTable.downloadedParts })
     .from(userProgressTable).where(eq(userProgressTable.userId, req.userId!));
   const downloadedByLesson = new Map(progress.map((row) => [row.lessonId, row.downloadedParts ?? []]));
-  const items = lessons.flatMap((lesson) => lessonParts(lesson).map((part) => ({
+  const accessible = await lessonAccess(courseId, req.userId, req.userRole);
+  const items = lessons.filter(lesson => accessible.has(lesson.id)).flatMap((lesson) => lessonParts(lesson).map((part) => ({
     lessonId: lesson.id,
     lessonTitle: lesson.title,
     partId: part.partId,
@@ -224,7 +241,8 @@ router.get("/courses/:courseId/download", requireAuth, async (req, res): Promise
   if (!course) { res.status(404).json({ error: "Course not found" }); return; }
   const lessons = await db.select().from(lessonsTable).where(eq(lessonsTable.courseId, courseId)).orderBy(lessonsTable.lessonOrder);
   if (lessons.length === 0 || !(await requireEnrollment(req.userId!, lessons[0]!))) { res.status(lessons.length ? 403 : 404).json({ error: lessons.length ? "Not enrolled in this course" : "Course has no lessons" }); return; }
-  const files = lessons.flatMap((lesson, lessonIndex) => lessonParts(lesson).filter(canDownload).map((part, partIndex) => {
+  const accessible = await lessonAccess(courseId, req.userId, req.userRole);
+  const files = lessons.filter(lesson => accessible.has(lesson.id)).flatMap((lesson, lessonIndex) => lessonParts(lesson).filter(canDownload).map((part, partIndex) => {
     const source = new URL(part.fileUrl, `${req.protocol}://${req.get("host")}`);
     const contentType = part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : null;
     return { lessonId: lesson.id, part, path: `${String(lessonIndex + 1).padStart(2, "0")} - ${archiveName(lesson.title)}/${String(partIndex + 1).padStart(2, "0")} - ${sourceFilename(part.title, source, contentType, part.contentType)}` };
@@ -241,6 +259,9 @@ router.get("/lessons/:id/download", requireAuth, async (req, res): Promise<void>
   const [lesson] = await db.select().from(lessonsTable).where(eq(lessonsTable.id, lessonId));
   if (!lesson) { res.status(404).json({ error: "Lesson not found" }); return; }
   if (!(await requireEnrollment(req.userId!, lesson))) { res.status(403).json({ error: "Not enrolled in this course" }); return; }
+  if (!(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lesson.id)) {
+    res.status(403).json({ error: "Complete the previous lesson to unlock this lesson" }); return;
+  }
   const files = lessonParts(lesson).filter(canDownload).map((part, partIndex) => {
     const source = new URL(part.fileUrl, `${req.protocol}://${req.get("host")}`);
     const contentType = part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : null;
@@ -271,6 +292,9 @@ router.get("/lessons/:id/parts/:partId/download", requireAuth, async (req, res):
     res.status(403).json({ error: "Not enrolled in this course" });
     return;
   }
+  if (!(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lesson.id)) {
+    res.status(403).json({ error: "Complete the previous lesson to unlock this lesson" }); return;
+  }
   const part = lessonParts(lesson).find((item) => item.partId === partId);
   if (!part) {
     res.status(404).json({ error: "Lesson part not found" });
@@ -282,21 +306,21 @@ router.get("/lessons/:id/parts/:partId/download", requireAuth, async (req, res):
   }
   const source = await resolveSource(part.fileUrl!, req);
   if (!source) {
-    res.status(422).json({ error: "This lesson part does not have a valid download URL" });
+    res.status(422).json({ error: "Download URL is invalid or its host is not allowed. Use a trusted HTTPS file host." });
     return;
   }
   let upstream: Response;
   try {
-    upstream = await fetch(source);
+    upstream = await fetchDownload(source);
   } catch {
     res.status(502).json({ error: "The lesson file could not be reached right now" });
     return;
   }
   if (!upstream.ok || !upstream.body || upstream.headers.get("content-type")?.toLowerCase().includes("text/html")) {
+    await upstream.body?.cancel();
     res.status(502).json({ error: "The lesson file could not be downloaded right now" });
     return;
   }
-  await markDownloaded(req.userId!, lessonId, [partId]);
   const upstreamContentType = upstream.headers.get("content-type");
   const contentType = upstreamContentType?.toLowerCase().includes("application/octet-stream")
     ? part.contentType === "pdf" ? "application/pdf" : part.contentType === "audio" ? "audio/mpeg" : part.contentType === "video" ? "video/mp4" : upstreamContentType
@@ -305,7 +329,8 @@ router.get("/lessons/:id/parts/:partId/download", requireAuth, async (req, res):
   const contentLength = upstream.headers.get("content-length");
   if (contentLength) res.setHeader("Content-Length", contentLength);
   res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(sourceFilename(part.title!, source, contentType, part.contentType))}`);
-  Readable.fromWeb(upstream.body as ReadableStream<Uint8Array>).pipe(res);
+  await pipeline(Readable.fromWeb(upstream.body as ReadableStream<Uint8Array>), res);
+  await markDownloaded(req.userId!, lessonId, [partId]);
 });
 
 async function hasPassedLessonQuiz(userId: string, lessonId: string): Promise<boolean> {
@@ -371,6 +396,9 @@ router.post("/lessons/:id/complete", requireAuth, async (req, res): Promise<void
     return;
   }
 
+  if (!(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lesson.id)) {
+    res.status(403).json({ error: "Complete the previous lesson to unlock this lesson" }); return;
+  }
   const quizPassed = await hasPassedLessonQuiz(req.userId!, lessonId);
   if (!quizPassed) {
     res.status(403).json({ error: "You must pass the lesson quiz before marking this lesson complete." });
@@ -416,7 +444,10 @@ router.post("/lessons/:id/parts/:partId/complete", requireAuth, async (req, res)
     return;
   }
 
-  const lessonParts = Array.isArray(lesson.parts) ? lesson.parts as Array<{ partId?: string }> : [];
+  if (!(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lesson.id)) {
+    res.status(403).json({ error: "Complete the previous lesson to unlock this lesson" }); return;
+  }
+  const lessonParts = Array.isArray(lesson.parts) && lesson.parts.length > 0 ? lesson.parts as Array<{ partId?: string }> : [{}];
   const knownPartIds = lessonParts.map((part, index) => part.partId ?? `legacy-${lesson.id}-${index}`);
   if (!knownPartIds.includes(partId)) {
     res.status(400).json({ error: "Part id is not part of this lesson" });
@@ -444,7 +475,7 @@ router.post("/lessons/:id/parts/:partId/complete", requireAuth, async (req, res)
       set: { completedParts },
     });
 
-  res.json({ completedPartIndexes: completedParts });
+  res.json({ completedPartIds: completedParts, completedPartIndexes: completedParts });
 });
 
 // ---------------------------------------------------------------------------
@@ -459,6 +490,10 @@ router.patch("/lessons/:id/progress", requireAuth, async (req, res): Promise<voi
   }
 
   const { completed } = req.body ?? {};
+  if (typeof completed !== "boolean") {
+    res.status(400).json({ error: "completed must be a boolean" });
+    return;
+  }
 
   // check lesson exists
   const [lesson] = await db
@@ -490,6 +525,9 @@ router.patch("/lessons/:id/progress", requireAuth, async (req, res): Promise<voi
   const isCompleted = Boolean(completed);
 
   if (isCompleted) {
+    if (!(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lesson.id)) {
+      res.status(403).json({ error: "Complete the previous lesson to unlock this lesson" }); return;
+    }
     const quizPassed = await hasPassedLessonQuiz(req.userId!, lessonId);
     if (!quizPassed) {
       res.status(403).json({ error: "You must pass the lesson quiz before marking this lesson complete." });

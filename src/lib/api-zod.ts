@@ -1,20 +1,31 @@
 import { z } from "zod";
 
 export const RegisterBody = z.object({
-  fullname: z.string().min(2),
-  email: z.string().email(),
-  password: z.string().min(6),
+  fullname: z.string().trim().min(2).max(200),
+  email: z.string().trim().toLowerCase().email().max(254),
+  password: z.string().min(6).refine(value => Buffer.byteLength(value, "utf8") <= 72, "Password must be at most 72 bytes"),
 });
 
 export const LoginBody = z.object({
-  email: z.string().email(),
+  email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 });
 
 export const UpdateProfileBody = z.object({
-  fullname: z.string().optional(),
-  avatarUrl: z.string().nullable().optional(),
+  fullname: z.string().trim().min(2).max(200).optional(),
+  avatarUrl: z.union([z.string().url(), z.literal("")]).nullable().optional(),
+}).refine(value => Object.keys(value).length > 0, "Provide at least one profile field");
+
+export const CreateUserBody = RegisterBody.extend({
+  role: z.enum(["student", "admin"]).default("student"),
 });
+
+export const ChangePasswordBody = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: RegisterBody.shape.password,
+}).refine(value => value.currentPassword !== value.newPassword, "Choose a different password");
+
+export const UpdateUserRoleBody = z.object({ role: z.enum(["student", "admin"]) });
 
 export const ListCoursesQueryParams = z.object({
   search: z.coerce.string().trim().optional(),
@@ -137,7 +148,7 @@ export const RequestUploadUrlResponse = z.object({
 });
 
 export const UpdateUserStatusParams = z.object({
-  id: z.coerce.string(),
+  id: z.string().uuid(),
 });
 
 export const UpdateUserStatusBody = z.object({

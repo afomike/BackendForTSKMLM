@@ -10,6 +10,7 @@ import {
 } from "../lib/db.js";
 import { eq, and, desc } from "drizzle-orm";
 import { requireAuth, requireAdmin } from "../lib/auth.js";
+import { lessonAccess } from "../lib/lesson-access.js";
 
 const router = Router();
 
@@ -22,7 +23,7 @@ function validateUpsertQuiz(body: unknown): {
   if (!body || typeof body !== "object") return null;
   const b = body as Record<string, unknown>;
   const passingScore = typeof b["passingScore"] === "number" ? Math.round(b["passingScore"]) : 70;
-  if (passingScore < 1 || passingScore > 100) return null;
+  if (!Number.isFinite(passingScore) || passingScore < 1 || passingScore > 100) return null;
   if (!Array.isArray(b["questions"]) || b["questions"].length < 1) return null;
   const questions = (b["questions"] as unknown[]).map((q: unknown) => {
     if (!q || typeof q !== "object") return null;
@@ -33,9 +34,11 @@ function validateUpsertQuiz(body: unknown): {
       if (!o || typeof o !== "object") return null;
       const oo = o as Record<string, unknown>;
       if (typeof oo["optionText"] !== "string" || !oo["optionText"].trim()) return null;
-      return { optionText: oo["optionText"] as string, isCorrect: !!oo["isCorrect"] };
+      if (typeof oo["isCorrect"] !== "boolean") return null;
+      return { optionText: (oo["optionText"] as string).trim(), isCorrect: oo["isCorrect"] };
     });
     if (options.some((o) => o === null)) return null;
+    if (options.filter(o => o?.isCorrect).length !== 1) return null;
     return { questionText: qo["questionText"] as string, options: options as Array<{ optionText: string; isCorrect: boolean }> };
   });
   if (questions.some((q) => q === null)) return null;
@@ -70,6 +73,11 @@ router.get("/lessons/:lessonId/quiz", requireAuth, async (req, res): Promise<voi
   if (!quiz) {
     res.status(404).json({ error: "No quiz for this lesson" });
     return;
+  }
+
+  const [lesson] = await db.select().from(lessonsTable).where(eq(lessonsTable.id, lessonId));
+  if (!lesson || !(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lessonId)) {
+    res.status(403).json({ error: "Complete the previous lesson to unlock this quiz" }); return;
   }
 
   const questions = await db
@@ -137,39 +145,43 @@ router.put("/lessons/:lessonId/quiz", requireAuth, requireAdmin, async (req, res
 
   const { passingScore, questions } = parsed;
 
-  // Upsert quiz row
-  const [quiz] = await db
-    .insert(quizzesTable)
-    .values({ lessonId, passingScore })
-    .onConflictDoUpdate({
-      target: quizzesTable.lessonId,
-      set: { passingScore, updatedAt: new Date() },
-    })
-    .returning();
-
-  // Delete all existing questions (cascades to options)
-  await db.delete(quizQuestionsTable).where(eq(quizQuestionsTable.quizId, quiz.id));
-
-  // Re-insert questions + options
-  for (let qi = 0; qi < questions.length; qi++) {
-    const q = questions[qi];
-    const [newQ] = await db
-      .insert(quizQuestionsTable)
-      .values({ quizId: quiz.id, questionText: q.questionText, questionOrder: qi })
+  const quizId = await db.transaction(async tx => {
+    // Upsert quiz row
+    const [quiz] = await tx
+      .insert(quizzesTable)
+      .values({ lessonId, passingScore })
+      .onConflictDoUpdate({
+        target: quizzesTable.lessonId,
+        set: { passingScore, updatedAt: new Date() },
+      })
       .returning();
 
-    for (let oi = 0; oi < q.options.length; oi++) {
-      const o = q.options[oi];
-      await db.insert(quizOptionsTable).values({
-        questionId: newQ.id,
-        optionText: o.optionText,
-        isCorrect: o.isCorrect,
-        optionOrder: oi,
-      });
-    }
-  }
+    // Delete all existing questions (cascades to options)
+    await tx.delete(quizQuestionsTable).where(eq(quizQuestionsTable.quizId, quiz.id));
 
-  res.json({ message: "Quiz saved", quizId: quiz.id });
+    // Re-insert questions + options
+    for (let qi = 0; qi < questions.length; qi++) {
+      const q = questions[qi];
+      const [newQ] = await tx
+        .insert(quizQuestionsTable)
+        .values({ quizId: quiz.id, questionText: q.questionText, questionOrder: qi })
+        .returning();
+
+      for (let oi = 0; oi < q.options.length; oi++) {
+        const o = q.options[oi];
+        await tx.insert(quizOptionsTable).values({
+          questionId: newQ.id,
+          optionText: o.optionText,
+          isCorrect: o.isCorrect,
+          optionOrder: oi,
+        });
+      }
+    }
+
+    return quiz.id;
+  });
+
+  res.json({ message: "Quiz saved", quizId });
 });
 
 // ── Admin: delete quiz for a lesson ──────────────────────────────────────────
@@ -225,6 +237,10 @@ router.post("/lessons/:lessonId/quiz/attempt", requireAuth, async (req, res): Pr
   if (!enrollment) {
     res.status(403).json({ error: "Not enrolled in this course" });
     return;
+  }
+
+  if (!(await lessonAccess(lesson.courseId, req.userId, req.userRole)).has(lesson.id)) {
+    res.status(403).json({ error: "Complete the previous lesson to unlock this quiz" }); return;
   }
 
   const [quiz] = await db

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { db, lessonsTable, enrollmentsTable, userProgressTable, quizzesTable, quizQuestionsTable, quizOptionsTable, quizAttemptsTable } from "../lib/db.js";
 import { eq, and, asc, gte, sql, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin, optionalAuth } from "../lib/auth.js";
+import { isLessonLocked, lessonAccess } from "../lib/lesson-access.js";
 import {
   ListLessonsParams,
   CreateLessonParams,
@@ -146,8 +147,7 @@ router.get("/courses/:courseId/lessons", optionalAuth, async (req, res): Promise
 
   const lessonsWithProgress = lessons.map((lesson, index) => {
     const isCompleted = completedLessonIds.has(lesson.id);
-    const prevCompleted = index === 0 || completedLessonIds.has(lessons[index - 1]!.id);
-    const isLocked = isEnrolled ? (!prevCompleted && index !== 0) : (index !== 0);
+    const isLocked = isLessonLocked(lessons, index, isEnrolled, completedLessonIds, req.userRole);
 
     return {
       id: lesson.id,
@@ -155,8 +155,8 @@ router.get("/courses/:courseId/lessons", optionalAuth, async (req, res): Promise
       title: lesson.title,
       lessonOrder: lesson.lessonOrder,
       contentType: asContentType(lesson.contentType),
-      fileUrl: lesson.fileUrl,
-      parts: serializeLessonParts(lesson.parts, lesson.id, {
+      fileUrl: isLocked ? "" : lesson.fileUrl,
+      parts: isLocked ? [] : serializeLessonParts(lesson.parts, lesson.id, {
         title: lesson.title,
         contentType: asContentType(lesson.contentType),
         fileUrl: lesson.fileUrl,
@@ -289,6 +289,12 @@ router.get("/lessons/:id", optionalAuth, async (req, res): Promise<void> => {
 
   if (!lesson) {
     res.status(404).json({ error: "Lesson not found" });
+    return;
+  }
+
+  const accessible = await lessonAccess(lesson.courseId, req.userId, req.userRole);
+  if (!accessible.has(lesson.id)) {
+    res.status(403).json({ error: "Enroll and complete the previous lesson to unlock this lesson" });
     return;
   }
 

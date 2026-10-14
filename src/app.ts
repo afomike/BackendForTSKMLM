@@ -5,6 +5,7 @@ import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
 const app = express();
+app.disable("x-powered-by");
 
 /**
  * Trust Render's proxy so req.secure / req.ip etc. work correctly
@@ -40,9 +41,7 @@ const corsOptions: cors.CorsOptions = {
 
     const normalizedOrigin = origin.replace(/\/$/, "");
 
-    const isAllowed =
-      allowedOrigins.includes(normalizedOrigin) ||
-      normalizedOrigin.endsWith(".vercel.app");
+    const isAllowed = allowedOrigins.includes(normalizedOrigin);
 
     if (isAllowed) {
       return callback(null, true);
@@ -53,6 +52,7 @@ const corsOptions: cors.CorsOptions = {
   },
 
   credentials: true,
+  exposedHeaders: ["Content-Disposition", "X-Total-Count", "X-Page", "X-Page-Size"],
 
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 
@@ -128,9 +128,9 @@ app.use((req, res) => {
 app.use(
   (err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
     logger.error(err);
-    res.status(err.status || 500).json({
-      message: err.message || "Internal server error",
-    });
+    if (res.headersSent) { _next(err); return; }
+    const status = Number.isInteger(err.status) && err.status >= 400 && err.status < 600 ? err.status : 500;
+    res.status(status).json({ error: status >= 500 ? "Internal server error" : err.message || "Request failed" });
   }
 );
 
